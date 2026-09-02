@@ -114,17 +114,31 @@ def sociavault_get(endpoint: str, params: dict) -> dict:
 
 
 def classify_focus(name: str) -> str:
+    """Classify the product into the production framing/motion bucket.
+
+    V5 intentionally exposes this value in the UI so the user can override it
+    before generation.
+    """
     text = re.sub(r"[^a-z0-9]+", " ", (name or "").lower()).strip()
     tokens = set(text.split())
+
     shoes = {"shoe", "shoes", "sneaker", "sneakers", "boot", "boots", "heel", "heels", "sandal", "sandals", "loafer", "loafers", "clog", "clogs", "slipper", "slippers", "slides"}
-    tops = {"shirt", "tee", "hoodie", "sweater", "jacket", "coat", "blouse", "top", "tank", "cardigan", "jersey", "polo"}
+    bags = {"bag", "handbag", "purse", "tote", "crossbody", "backpack", "clutch", "satchel"}
+    hoodies = {"hoodie", "hooded", "sweatshirt", "pullover"}
+    tops = {"shirt", "tee", "sweater", "jacket", "coat", "blouse", "top", "tank", "cardigan", "jersey", "polo"}
     bottoms = {"pants", "pant", "jeans", "jean", "shorts", "leggings", "legging", "jogger", "joggers", "trouser", "trousers", "skirt", "cargo"}
-    outfit_phrases = ("two piece", "2 piece", "matching set", "tracksuit", "jumpsuit", "romper")
+    outfit_phrases = ("two piece", "2 piece", "two-piece", "matching set", "tracksuit", "track suit", "jumpsuit", "romper")
     outfit_tokens = {"set", "outfit", "suit", "dress"}
+
     if tokens & shoes:
         return "shoes"
+    if tokens & bags:
+        return "handbag"
+    # A hoodie + pants set should stay an outfit rather than being reduced to a hoodie.
     if any(p in text for p in outfit_phrases) or tokens & outfit_tokens:
         return "outfit"
+    if tokens & hoodies or "zip hoodie" in text or "zip up hoodie" in text:
+        return "hoodie"
     if tokens & tops or "t shirt" in text:
         return "shirt"
     if tokens & bottoms:

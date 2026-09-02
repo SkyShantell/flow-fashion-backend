@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from contextlib import contextmanager
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 
@@ -29,9 +29,47 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expi
 Base = declarative_base()
 
 
+def _add_missing_columns() -> None:
+    """Tiny idempotent migration for V5 production-setting fields.
+
+    Existing Railway databases were created before these columns existed;
+    SQLAlchemy create_all does not alter an existing table.
+    """
+    if not IS_SQLITE:
+        statements = [
+            "ALTER TABLE batches ADD COLUMN IF NOT EXISTS scene_pool JSON",
+            "ALTER TABLE batches ADD COLUMN IF NOT EXISTS motion_pool JSON",
+            "ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS scene_override VARCHAR(120)",
+            "ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS motion_style_override VARCHAR(80)",
+        ]
+        with engine.begin() as conn:
+            for sql in statements:
+                conn.exec_driver_sql(sql)
+        return
+
+    inspector = inspect(engine)
+    additions = {
+        "batches": {
+            "scene_pool": "JSON",
+            "motion_pool": "JSON",
+        },
+        "product_jobs": {
+            "scene_override": "VARCHAR(120)",
+            "motion_style_override": "VARCHAR(80)",
+        },
+    }
+    with engine.begin() as conn:
+        for table, columns in additions.items():
+            existing = {c["name"] for c in inspector.get_columns(table)}
+            for name, col_type in columns.items():
+                if name not in existing:
+                    conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {name} {col_type}")
+
+
 def init_db() -> None:
     from backend import models  # noqa: F401
     Base.metadata.create_all(bind=engine)
+    _add_missing_columns()
 
 
 @contextmanager

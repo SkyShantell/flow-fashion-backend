@@ -217,7 +217,7 @@ def run_generate_image(db: Session, task: QueueTask) -> None:
     avatar_media_id = _upload_avatar_if_needed(db, batch)
     refs = _ensure_product_refs(db, job, avatar_media_id)
     result = useapi.generate_image(
-        image_prompt(job, scene=batch.scene or "Modern apartment mirror", refs_count=len(refs), creator_profile=batch.creator_profile or "Male"),
+        image_prompt(job, scene=job.scene_override or batch.scene or "Modern apartment mirror", refs_count=len(refs), creator_profile=batch.creator_profile or "Male"),
         refs,
         settings().google_flow_email,
     )
@@ -256,7 +256,16 @@ def run_submit_video(db: Session, task: QueueTask) -> None:
     db.add(job)
     db.flush()
 
-    result = useapi.submit_video(job.image_media_id, video_prompt(job, creator_profile=batch.creator_profile or "Male", video_style=batch.video_style or "Calm"), settings().google_flow_email)
+    prompt_text = str((task.payload or {}).get("prompt_override") or "").strip()
+    if not prompt_text:
+        prompt_text = video_prompt(job, creator_profile=batch.creator_profile or "Male", video_style=job.motion_style_override or batch.video_style or "Calm")
+    # Persist the exact submitted prompt on the queue task so the UI can show what the current video used
+    # without requiring a database schema migration.
+    task.payload = {**dict(task.payload or {}), "prompt_used": prompt_text}
+    db.add(task)
+    db.flush()
+
+    result = useapi.submit_video(job.image_media_id, prompt_text, settings().google_flow_email)
     job.video_job_id = result["job_id"]
     job.video_status = str(result.get("status") or "created").lower()
     job.stage = "video_processing"

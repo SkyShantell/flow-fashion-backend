@@ -20,10 +20,13 @@ from backend.schemas import (
     ImportScannerRequest,
     JobOut,
     RegenerateJobRequest,
+    RegenerateVideoRequest,
     RetryJobRequest,
     SelectProductRefsRequest,
+    UpdateJobSettingsRequest,
 )
 from backend.services import sheets
+from backend.prompts import MOTION_STYLES, SCENES, video_prompt
 from backend.tasks import enqueue_task, run_one_claimed_task
 
 app = FastAPI(title="Flow Try-On Factory Phase 1 API", version="0.1.0")
@@ -60,7 +63,29 @@ def _job_error(job: ProductJob) -> str | None:
     return job.image_error or job.video_error or job.upscale_error or job.drive_error
 
 
+FOCUS_VALUES = {"outfit", "shirt", "hoodie", "pants", "shoes", "handbag"}
+
+
+def _scene_pool(batch: Batch) -> list[str]:
+    values = [str(x).strip() for x in list(batch.scene_pool or []) if str(x).strip()]
+    return values or [batch.scene or "Modern apartment mirror"]
+
+
+def _motion_pool(batch: Batch) -> list[str]:
+    values = [str(x).strip() for x in list(batch.motion_pool or []) if str(x).strip()]
+    return values or [batch.video_style or "Calm"]
+
+
+def _assign_defaults(batch: Batch, index: int) -> tuple[str, str]:
+    scenes = _scene_pool(batch)
+    motions = _motion_pool(batch)
+    return scenes[index % len(scenes)], motions[index % len(motions)]
+
+
 def job_out(job: ProductJob) -> JobOut:
+    batch = getattr(job, "batch", None)
+    scene = job.scene_override or (batch.scene if batch else None) or "Modern apartment mirror"
+    motion_style = job.motion_style_override or (batch.video_style if batch else None) or "Calm"
     return JobOut(
         id=job.id,
         batch_id=job.batch_id,
@@ -68,6 +93,8 @@ def job_out(job: ProductJob) -> JobOut:
         product_url=job.product_url,
         product_id=job.product_id,
         focus=job.focus,
+        scene=scene,
+        motion_style=motion_style,
         listing_images=list(job.listing_images or []),
         review_images=list(job.review_images or []),
         selected_refs=list(job.selected_refs or []),
@@ -102,8 +129,10 @@ def batch_out(batch: Batch, db: Session) -> BatchOut:
         id=batch.id,
         name=batch.name,
         scene=batch.scene,
+        scene_pool=_scene_pool(batch),
         creator_profile=batch.creator_profile,
         video_style=batch.video_style,
+        motion_pool=_motion_pool(batch),
         auto_approve=bool(batch.auto_approve),
         status=batch.status or "open",
         counts=counts,
@@ -129,11 +158,15 @@ def health():
 
 @app.post("/batches", response_model=BatchOut, dependencies=[Depends(require_api_key)])
 def create_batch(req: CreateBatchRequest, db: Session = Depends(get_db)):
+    requested_scenes = [x for x in req.scene_pool if x in SCENES] or ([req.scene] if req.scene in SCENES else ["Modern apartment mirror"])
+    requested_motions = [x for x in req.motion_pool if x in MOTION_STYLES] or ([req.video_style] if req.video_style in MOTION_STYLES else ["Calm"])
     batch = Batch(
         name=req.name,
-        scene=req.scene,
+        scene=requested_scenes[0],
+        scene_pool=requested_scenes,
         creator_profile=req.creator_profile,
-        video_style=req.video_style,
+        video_style=requested_motions[0],
+        motion_pool=requested_motions,
         auto_approve=req.auto_approve,
         avatar_b64=req.avatar_b64,
         avatar_mime=req.avatar_mime or "image/jpeg",
@@ -162,9 +195,11 @@ def create_batch_form(
         avatar_mime = avatar.content_type or "image/jpeg"
     batch = Batch(
         name=name,
-        scene=scene,
+        scene=scene if scene in SCENES else "Modern apartment mirror",
+        scene_pool=[scene if scene in SCENES else "Modern apartment mirror"],
         creator_profile=creator_profile,
-        video_style=video_style,
+        video_style=video_style if video_style in MOTION_STYLES else "Calm",
+        motion_pool=[video_style if video_style in MOTION_STYLES else "Calm"],
         auto_approve=auto_approve,
         avatar_b64=avatar_b64,
         avatar_mime=avatar_mime,
@@ -202,11 +237,15 @@ def import_products(batch_id: str, req: ImportProductsRequest, db: Session = Dep
     if not links:
         raise HTTPException(400, "No product links supplied")
 
-    existing = {j.product_url for j in db.query(ProductJob).filter(ProductJob.batch_id == batch.id).all()}
+    existing_jobs = db.query(ProductJob).filter(ProductJob.batch_id == batch.id).order_by(ProductJob.created_at.asc()).all()
+    existing = {j.product_url for j in existing_jobs}
+    next_index = len(existing_jobs)
     for link in links[: settings().max_batch_links]:
         if link in existing:
             continue
-        job = ProductJob(batch_id=batch.id, product_url=link, stage="pending_import")
+        assigned_scene, assigned_motion = _assign_defaults(batch, next_index)
+        next_index += 1
+        job = ProductJob(batch_id=batch.id, product_url=link, stage="pending_import", scene_override=assigned_scene, motion_style_override=assigned_motion)
         db.add(job)
         db.flush()
         enqueue_task(db, "import_product", job_id=job.id, batch_id=batch.id, payload={"start_generation": req.start_generation}, priority=10, max_attempts=3)
@@ -244,14 +283,20 @@ def import_from_scanner(batch_id: str, req: ImportScannerRequest, db: Session = 
     row_nums = [int(r.get("_row_num")) for r in selected if int(r.get("_row_num") or 0) >= 2]
     mark_error = sheets.mark_scanner_rows(row_nums, "Importing", batch.id)
 
-    existing = {j.product_url for j in db.query(ProductJob).filter(ProductJob.batch_id == batch.id).all()}
+    existing_jobs = db.query(ProductJob).filter(ProductJob.batch_id == batch.id).order_by(ProductJob.created_at.asc()).all()
+    existing = {j.product_url for j in existing_jobs}
+    next_index = len(existing_jobs)
     for rec in selected:
         link = str(rec.get("Product Link") or "").strip()
         if not link or link in existing:
             continue
+        assigned_scene, assigned_motion = _assign_defaults(batch, next_index)
+        next_index += 1
         job = ProductJob(
             batch_id=batch.id,
             product_url=link,
+            scene_override=assigned_scene,
+            motion_style_override=assigned_motion,
             product_name=str(rec.get("Product Name") or "Unknown Product"),
             stage="pending_import",
             scanner_row_num=int(rec.get("_row_num") or 0) or None,
@@ -298,6 +343,22 @@ def select_product_references(job_id: str, req: SelectProductRefsRequest, db: Se
     if invalid:
         raise HTTPException(400, "One or more selected photos are not from this imported product")
 
+    if req.focus is not None:
+        focus = str(req.focus).strip().lower()
+        if focus not in FOCUS_VALUES:
+            raise HTTPException(400, "Unknown product type")
+        job.focus = focus
+    if req.scene is not None:
+        scene = str(req.scene).strip()
+        if scene not in SCENES:
+            raise HTTPException(400, "Unknown background setting")
+        job.scene_override = scene
+    if req.motion_style is not None:
+        motion = str(req.motion_style).strip()
+        if motion not in MOTION_STYLES:
+            raise HTTPException(400, "Unknown motion style")
+        job.motion_style_override = motion
+
     job.selected_refs = refs
     # Force Flow reference uploads to be rebuilt when the user changes photos.
     job.flow_product_ref_ids = []
@@ -319,6 +380,140 @@ def select_product_references(job_id: str, req: SelectProductRefsRequest, db: Se
         db.add(job)
         enqueue_task(db, "generate_image", job_id=job.id, batch_id=job.batch_id, priority=20, max_attempts=2, allow_duplicate=True)
 
+    db.commit()
+    db.refresh(job)
+    return job_out(job)
+
+
+@app.post("/jobs/{job_id}/production-settings", response_model=JobOut, dependencies=[Depends(require_api_key)])
+def update_job_production_settings(job_id: str, req: UpdateJobSettingsRequest, db: Session = Depends(get_db)):
+    job = db.get(ProductJob, job_id)
+    if not job:
+        raise HTTPException(404, "Job not found")
+
+    image_started = job.image_status in {"processing", "completed"} or job.stage in {"generating_image", "awaiting_approval", "ready_for_video", "submitting_video", "video_processing", "upscaling", "complete"}
+    if image_started and (req.focus is not None or req.scene is not None):
+        raise HTTPException(409, "Product type/background are locked after image generation starts. Regenerate the image to change them.")
+
+    if req.focus is not None:
+        focus = str(req.focus).strip().lower()
+        if focus not in FOCUS_VALUES:
+            raise HTTPException(400, "Unknown product type")
+        job.focus = focus
+    if req.scene is not None:
+        scene = str(req.scene).strip()
+        if scene not in SCENES:
+            raise HTTPException(400, "Unknown background setting")
+        job.scene_override = scene
+    if req.motion_style is not None:
+        motion = str(req.motion_style).strip()
+        if motion not in MOTION_STYLES:
+            raise HTTPException(400, "Unknown motion style")
+        job.motion_style_override = motion
+
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+    return job_out(job)
+
+
+def _default_video_prompt(job: ProductJob, db: Session) -> str:
+    batch = db.get(Batch, job.batch_id)
+    if not batch:
+        raise HTTPException(404, "Batch not found")
+    return video_prompt(
+        job,
+        creator_profile=batch.creator_profile or "Male",
+        video_style=job.motion_style_override or batch.video_style or "Calm",
+    )
+
+
+def _last_video_prompt(job: ProductJob, db: Session) -> tuple[str, str]:
+    task = (
+        db.query(QueueTask)
+        .filter(QueueTask.job_id == job.id, QueueTask.task_type == "submit_video")
+        .order_by(QueueTask.created_at.desc())
+        .first()
+    )
+    payload = dict(task.payload or {}) if task else {}
+    used = str(payload.get("prompt_used") or payload.get("prompt_override") or "").strip()
+    if used:
+        return used, "last_used"
+    return _default_video_prompt(job, db), "default"
+
+
+@app.get("/jobs/{job_id}/video-prompt", dependencies=[Depends(require_api_key)])
+def get_video_prompt(job_id: str, db: Session = Depends(get_db)):
+    job = db.get(ProductJob, job_id)
+    if not job:
+        raise HTTPException(404, "Job not found")
+    default = _default_video_prompt(job, db)
+    used, source = _last_video_prompt(job, db)
+    return {
+        "job_id": job.id,
+        "default_prompt": default,
+        "prompt_used": used,
+        "source": source,
+        "can_regenerate": bool(job.image_status == "completed" and job.approved),
+    }
+
+
+@app.post("/jobs/{job_id}/regenerate-video", response_model=JobOut, dependencies=[Depends(require_api_key)])
+def regenerate_video(job_id: str, req: RegenerateVideoRequest, db: Session = Depends(get_db)):
+    job = db.get(ProductJob, job_id)
+    if not job:
+        raise HTTPException(404, "Job not found")
+    if job.image_status != "completed" or not job.image_media_id:
+        raise HTTPException(400, "A completed try-on image is required before regenerating video.")
+    if not job.approved:
+        raise HTTPException(400, "Approve the image before regenerating video.")
+
+    active = (
+        db.query(QueueTask)
+        .filter(
+            QueueTask.job_id == job.id,
+            QueueTask.task_type.in_(["submit_video", "poll_video", "submit_upscale", "poll_upscale"]),
+            QueueTask.status.in_(["queued", "running"]),
+        )
+        .first()
+    )
+    if active:
+        raise HTTPException(409, "This video is still processing. Wait for the current attempt to finish before regenerating it.")
+
+    prompt = str(req.prompt or "").strip() or _default_video_prompt(job, db)
+
+    # Keep the approved still image, but reset only the video/upscale/archive-video pipeline.
+    job.video_status = "pending"
+    job.video_job_id = None
+    job.video_source_media_id = None
+    job.video_source_url = None
+    job.video_source_resolution = None
+    job.thumbnail_url = None
+    job.video_error = None
+    job.upscale_status = "pending"
+    job.upscale_job_id = None
+    job.video_media_id = None
+    job.video_url = None
+    job.video_resolution = None
+    job.upscale_error = None
+    job.drive_video_id = None
+    job.drive_video_url = None
+    job.drive_video_download_url = None
+    job.drive_error = None
+    job.stage = "queued_video_regen"
+    db.add(job)
+    db.flush()
+    enqueue_task(
+        db,
+        "submit_video",
+        job_id=job.id,
+        batch_id=job.batch_id,
+        payload={"prompt_override": prompt, "regenerated": True},
+        priority=25,
+        max_attempts=2,
+        allow_duplicate=True,
+    )
+    enqueue_task(db, "sync_sheet", job_id=job.id, batch_id=job.batch_id, priority=300, max_attempts=2, allow_duplicate=True)
     db.commit()
     db.refresh(job)
     return job_out(job)

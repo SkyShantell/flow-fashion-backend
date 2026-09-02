@@ -24,8 +24,10 @@ class Batch(Base):
     name = Column(String(200), default="Flow batch")
     source = Column(String(80), default="manual")
     scene = Column(String(120), default="Modern apartment mirror")
+    scene_pool = Column(JSON, default=list)
     creator_profile = Column(String(40), default="Male")
-    video_style = Column(String(40), default="Calm")
+    video_style = Column(String(80), default="Calm")
+    motion_pool = Column(JSON, default=list)
     auto_approve = Column(Boolean, default=False)
 
     avatar_b64 = Column(Text, nullable=True)
@@ -50,6 +52,8 @@ class ProductJob(Base):
     product_name = Column(Text, default="Unknown Product")
     focus = Column(String(40), default="outfit")
     back_design = Column(Boolean, default=False)
+    scene_override = Column(String(120), nullable=True)
+    motion_style_override = Column(String(80), nullable=True)
 
     listing_images = Column(JSON, default=list)
     review_images = Column(JSON, default=list)
@@ -77,8 +81,8 @@ class ProductJob(Base):
 
     upscale_status = Column(String(80), default="pending")
     upscale_job_id = Column(String(500), nullable=True)
-    video_media_id = Column(String(500), nullable=True)  # final/upscaled ID
-    video_url = Column(Text, nullable=True)              # final/upscaled URL
+    video_media_id = Column(String(500), nullable=True)
+    video_url = Column(Text, nullable=True)
     video_resolution = Column(String(40), nullable=True)
     upscale_error = Column(Text, nullable=True)
 
@@ -121,7 +125,7 @@ class QueueTask(Base):
 
     id = Column(String(64), primary_key=True, default=lambda: new_id("task"))
     task_type = Column(String(80), nullable=False, index=True)
-    status = Column(String(40), default="queued", index=True)  # queued/running/done/failed
+    status = Column(String(40), default="queued", index=True)
     priority = Column(Integer, default=100, index=True)
 
     batch_id = Column(String(64), ForeignKey("batches.id"), nullable=True, index=True)

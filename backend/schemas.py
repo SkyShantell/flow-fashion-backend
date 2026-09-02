@@ -6,8 +6,10 @@ from pydantic import BaseModel, Field
 class CreateBatchRequest(BaseModel):
     name: str = "Flow batch"
     scene: str = "Modern apartment mirror"
+    scene_pool: list[str] = Field(default_factory=list)
     creator_profile: str = "Male"
     video_style: str = "Calm"
+    motion_pool: list[str] = Field(default_factory=list)
     auto_approve: bool = False
     avatar_b64: str | None = None
     avatar_mime: str = "image/jpeg"
@@ -27,6 +29,15 @@ class ImportScannerRequest(BaseModel):
 class SelectProductRefsRequest(BaseModel):
     refs: list[str] = Field(default_factory=list)
     start_generation: bool = True
+    focus: str | None = None
+    scene: str | None = None
+    motion_style: str | None = None
+
+
+class UpdateJobSettingsRequest(BaseModel):
+    focus: str | None = None
+    scene: str | None = None
+    motion_style: str | None = None
 
 
 class ApproveJobRequest(BaseModel):
@@ -42,6 +53,10 @@ class RetryJobRequest(BaseModel):
     step: str = "auto"  # auto/import/image/video/upscale/archive/sheet
 
 
+class RegenerateVideoRequest(BaseModel):
+    prompt: str = ""
+
+
 class JobOut(BaseModel):
     id: str
     batch_id: str
@@ -49,6 +64,8 @@ class JobOut(BaseModel):
     product_url: str | None
     product_id: str | None
     focus: str | None
+    scene: str | None = None
+    motion_style: str | None = None
     listing_images: list[str] = Field(default_factory=list)
     review_images: list[str] = Field(default_factory=list)
     selected_refs: list[str] = Field(default_factory=list)
@@ -68,8 +85,10 @@ class BatchOut(BaseModel):
     id: str
     name: str | None
     scene: str | None
+    scene_pool: list[str] = Field(default_factory=list)
     creator_profile: str | None
     video_style: str | None
+    motion_pool: list[str] = Field(default_factory=list)
     auto_approve: bool
     status: str
     counts: dict
