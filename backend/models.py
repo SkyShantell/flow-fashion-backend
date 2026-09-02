@@ -17,6 +17,17 @@ def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:18]}"
 
 
+class SavedAvatar(Base):
+    __tablename__ = "saved_avatars"
+
+    id = Column(String(64), primary_key=True, default=lambda: new_id("avatar"))
+    name = Column(String(160), nullable=False)
+    image_b64 = Column(Text, nullable=False)
+    image_mime = Column(String(80), default="image/jpeg")
+    created_at = Column(DateTime(timezone=True), default=utcnow)
+    updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
 class Batch(Base):
     __tablename__ = "batches"
 

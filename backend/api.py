@@ -11,9 +11,10 @@ from sqlalchemy.orm import Session
 
 from backend.config import google_service_account_info, settings
 from backend.db import SessionLocal, init_db
-from backend.models import Batch, ProductJob, QueueTask
+from backend.models import Batch, ProductJob, QueueTask, SavedAvatar
 from backend.schemas import (
     ApproveJobRequest,
+    AvatarOut,
     BatchOut,
     CreateBatchRequest,
     ImportProductsRequest,
@@ -23,6 +24,7 @@ from backend.schemas import (
     RegenerateVideoRequest,
     RetryJobRequest,
     SelectProductRefsRequest,
+    SaveAvatarRequest,
     UpdateJobSettingsRequest,
 )
 from backend.services import sheets
@@ -154,6 +156,39 @@ def health():
         "video_native_resolution": cfg.video_native_resolution,
         "video_final_resolution": cfg.video_final_resolution,
     }
+
+
+@app.get("/avatars", response_model=list[AvatarOut], dependencies=[Depends(require_api_key)])
+def list_saved_avatars(db: Session = Depends(get_db)):
+    rows = db.query(SavedAvatar).order_by(SavedAvatar.created_at.desc()).all()
+    return [AvatarOut(id=row.id, name=row.name, image_b64=row.image_b64, image_mime=row.image_mime or "image/jpeg") for row in rows]
+
+
+@app.post("/avatars", response_model=AvatarOut, dependencies=[Depends(require_api_key)])
+def save_avatar(req: SaveAvatarRequest, db: Session = Depends(get_db)):
+    name = str(req.name or "Saved avatar").strip()[:160] or "Saved avatar"
+    image_b64 = str(req.image_b64 or "").strip()
+    if not image_b64:
+        raise HTTPException(400, "Avatar image is required")
+    try:
+        base64.b64decode(image_b64, validate=True)
+    except Exception:
+        raise HTTPException(400, "Avatar image is not valid base64")
+    row = SavedAvatar(name=name, image_b64=image_b64, image_mime=req.image_mime or "image/jpeg")
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return AvatarOut(id=row.id, name=row.name, image_b64=row.image_b64, image_mime=row.image_mime or "image/jpeg")
+
+
+@app.delete("/avatars/{avatar_id}", dependencies=[Depends(require_api_key)])
+def delete_saved_avatar(avatar_id: str, db: Session = Depends(get_db)):
+    row = db.get(SavedAvatar, avatar_id)
+    if not row:
+        raise HTTPException(404, "Avatar not found")
+    db.delete(row)
+    db.commit()
+    return {"ok": True}
 
 
 @app.post("/batches", response_model=BatchOut, dependencies=[Depends(require_api_key)])

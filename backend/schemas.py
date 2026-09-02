@@ -3,6 +3,19 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 
+class SaveAvatarRequest(BaseModel):
+    name: str = "Saved avatar"
+    image_b64: str
+    image_mime: str = "image/jpeg"
+
+
+class AvatarOut(BaseModel):
+    id: str
+    name: str
+    image_b64: str
+    image_mime: str
+
+
 class CreateBatchRequest(BaseModel):
     name: str = "Flow batch"
     scene: str = "Modern apartment mirror"
