@@ -26,7 +26,7 @@ from backend.schemas import (
     UpdateJobSettingsRequest,
 )
 from backend.services import sheets
-from backend.prompts import MOTION_STYLES, SCENES, video_prompt
+from backend.prompts import MOTION_STYLES, SCENES, default_motion_style, video_prompt
 from backend.tasks import enqueue_task, run_one_claimed_task
 
 app = FastAPI(title="Flow Try-On Factory Phase 1 API", version="0.1.0")
@@ -73,7 +73,7 @@ def _scene_pool(batch: Batch) -> list[str]:
 
 def _motion_pool(batch: Batch) -> list[str]:
     values = [str(x).strip() for x in list(batch.motion_pool or []) if str(x).strip()]
-    return values or [batch.video_style or "Calm"]
+    return values or [batch.video_style or default_motion_style(batch.creator_profile or "Male")]
 
 
 def _assign_defaults(batch: Batch, index: int) -> tuple[str, str]:
@@ -85,7 +85,7 @@ def _assign_defaults(batch: Batch, index: int) -> tuple[str, str]:
 def job_out(job: ProductJob) -> JobOut:
     batch = getattr(job, "batch", None)
     scene = job.scene_override or (batch.scene if batch else None) or "Modern apartment mirror"
-    motion_style = job.motion_style_override or (batch.video_style if batch else None) or "Calm"
+    motion_style = job.motion_style_override or (batch.video_style if batch else None) or default_motion_style(batch.creator_profile if batch else "Male")
     return JobOut(
         id=job.id,
         batch_id=job.batch_id,
@@ -159,7 +159,8 @@ def health():
 @app.post("/batches", response_model=BatchOut, dependencies=[Depends(require_api_key)])
 def create_batch(req: CreateBatchRequest, db: Session = Depends(get_db)):
     requested_scenes = [x for x in req.scene_pool if x in SCENES] or ([req.scene] if req.scene in SCENES else ["Modern apartment mirror"])
-    requested_motions = [x for x in req.motion_pool if x in MOTION_STYLES] or ([req.video_style] if req.video_style in MOTION_STYLES else ["Calm"])
+    default_motion = default_motion_style(req.creator_profile)
+    requested_motions = [x for x in req.motion_pool if x in MOTION_STYLES] or ([req.video_style] if req.video_style in MOTION_STYLES else [default_motion])
     batch = Batch(
         name=req.name,
         scene=requested_scenes[0],
@@ -182,7 +183,7 @@ def create_batch_form(
     name: str = Form("Flow batch"),
     scene: str = Form("Modern apartment mirror"),
     creator_profile: str = Form("Male"),
-    video_style: str = Form("Calm"),
+    video_style: str = Form("Academy — Boss / Calm"),
     auto_approve: bool = Form(False),
     avatar: UploadFile | None = File(None),
     db: Session = Depends(get_db),
@@ -198,8 +199,8 @@ def create_batch_form(
         scene=scene if scene in SCENES else "Modern apartment mirror",
         scene_pool=[scene if scene in SCENES else "Modern apartment mirror"],
         creator_profile=creator_profile,
-        video_style=video_style if video_style in MOTION_STYLES else "Calm",
-        motion_pool=[video_style if video_style in MOTION_STYLES else "Calm"],
+        video_style=video_style if video_style in MOTION_STYLES else default_motion_style(creator_profile),
+        motion_pool=[video_style if video_style in MOTION_STYLES else default_motion_style(creator_profile)],
         auto_approve=auto_approve,
         avatar_b64=avatar_b64,
         avatar_mime=avatar_mime,
@@ -424,7 +425,7 @@ def _default_video_prompt(job: ProductJob, db: Session) -> str:
     return video_prompt(
         job,
         creator_profile=batch.creator_profile or "Male",
-        video_style=job.motion_style_override or batch.video_style or "Calm",
+        video_style=job.motion_style_override or batch.video_style or default_motion_style(batch.creator_profile or "Male"),
     )
 
 

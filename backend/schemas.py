@@ -8,7 +8,7 @@ class CreateBatchRequest(BaseModel):
     scene: str = "Modern apartment mirror"
     scene_pool: list[str] = Field(default_factory=list)
     creator_profile: str = "Male"
-    video_style: str = "Calm"
+    video_style: str = "Academy — Boss / Calm"
     motion_pool: list[str] = Field(default_factory=list)
     auto_approve: bool = False
     avatar_b64: str | None = None

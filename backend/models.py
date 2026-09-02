@@ -26,7 +26,7 @@ class Batch(Base):
     scene = Column(String(120), default="Modern apartment mirror")
     scene_pool = Column(JSON, default=list)
     creator_profile = Column(String(40), default="Male")
-    video_style = Column(String(80), default="Calm")
+    video_style = Column(String(80), default="Academy — Boss / Calm")
     motion_pool = Column(JSON, default=list)
     auto_approve = Column(Boolean, default=False)
 

@@ -124,8 +124,8 @@ def classify_focus(name: str) -> str:
 
     shoes = {"shoe", "shoes", "sneaker", "sneakers", "boot", "boots", "heel", "heels", "sandal", "sandals", "loafer", "loafers", "clog", "clogs", "slipper", "slippers", "slides"}
     bags = {"bag", "handbag", "purse", "tote", "crossbody", "backpack", "clutch", "satchel"}
-    hoodies = {"hoodie", "hooded", "sweatshirt", "pullover"}
-    tops = {"shirt", "tee", "sweater", "jacket", "coat", "blouse", "top", "tank", "cardigan", "jersey", "polo"}
+    hoodies = {"hoodie", "hooded", "sweatshirt", "pullover", "jacket", "coat", "windbreaker", "parka"}
+    tops = {"shirt", "tee", "sweater", "blouse", "top", "tank", "cardigan", "jersey", "polo"}
     bottoms = {"pants", "pant", "jeans", "jean", "shorts", "leggings", "legging", "jogger", "joggers", "trouser", "trousers", "skirt", "cargo"}
     outfit_phrases = ("two piece", "2 piece", "two-piece", "matching set", "tracksuit", "track suit", "jumpsuit", "romper")
     outfit_tokens = {"set", "outfit", "suit", "dress"}

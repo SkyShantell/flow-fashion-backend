@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from backend.config import settings
 from backend.db import session_scope
 from backend.models import Batch, ProductJob, QueueTask, utcnow
-from backend.prompts import image_prompt, video_prompt
+from backend.prompts import default_motion_style, image_prompt, video_prompt
 from backend.services import drive, sheets, sociavault, useapi
 
 TERMINAL_TASK_STATUSES = {"done", "failed", "canceled"}
@@ -258,7 +258,7 @@ def run_submit_video(db: Session, task: QueueTask) -> None:
 
     prompt_text = str((task.payload or {}).get("prompt_override") or "").strip()
     if not prompt_text:
-        prompt_text = video_prompt(job, creator_profile=batch.creator_profile or "Male", video_style=job.motion_style_override or batch.video_style or "Calm")
+        prompt_text = video_prompt(job, creator_profile=batch.creator_profile or "Male", video_style=job.motion_style_override or batch.video_style or default_motion_style(batch.creator_profile or "Male"))
     # Persist the exact submitted prompt on the queue task so the UI can show what the current video used
     # without requiring a database schema migration.
     task.payload = {**dict(task.payload or {}), "prompt_used": prompt_text}
