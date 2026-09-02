@@ -91,6 +91,7 @@ class JobOut(BaseModel):
     video_url: str | None
     video_resolution: str | None
     drive_video_url: str | None
+    drive_video_download_url: str | None = None
     error: str | None = None
 
 

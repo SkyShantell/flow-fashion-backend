@@ -109,6 +109,7 @@ def job_out(job: ProductJob) -> JobOut:
         video_url=job.video_url or job.drive_video_download_url,
         video_resolution=job.video_resolution,
         drive_video_url=job.drive_video_url,
+        drive_video_download_url=job.drive_video_download_url,
         error=_job_error(job),
     )
 
@@ -636,6 +637,63 @@ def retry_job(job_id: str, req: RetryJobRequest, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(job)
     return job_out(job)
+
+
+@app.post("/batches/{batch_id}/generate-images", response_model=BatchOut, dependencies=[Depends(require_api_key)])
+def generate_all_images(batch_id: str, db: Session = Depends(get_db)):
+    """Queue every product whose references were explicitly reviewed/saved."""
+    batch = db.get(Batch, batch_id)
+    if not batch:
+        raise HTTPException(404, "Batch not found")
+    jobs = db.query(ProductJob).filter(ProductJob.batch_id == batch.id).order_by(ProductJob.created_at.asc()).all()
+    queued = 0
+    for job in jobs:
+        # `ready_for_image` is only reached after the operator saves the product-photo picker.
+        # This prevents bulk generation from silently using SociaVault's automatic defaults.
+        if job.stage != "ready_for_image" or not list(job.selected_refs or []):
+            continue
+        if job.image_status in {"processing", "completed"}:
+            continue
+        job.image_status = "pending"
+        job.image_error = None
+        job.stage = "queued_image"
+        db.add(job)
+        db.flush()
+        enqueue_task(db, "generate_image", job_id=job.id, batch_id=job.batch_id, priority=20, max_attempts=2)
+        queued += 1
+    if not queued:
+        raise HTTPException(400, "No reviewed products are waiting for image generation. Save product photos first.")
+    db.commit()
+    db.refresh(batch)
+    return batch_out(batch, db)
+
+
+@app.post("/batches/{batch_id}/generate-videos", response_model=BatchOut, dependencies=[Depends(require_api_key)])
+def generate_all_videos(batch_id: str, db: Session = Depends(get_db)):
+    """Approve and queue video generation for every completed image that has not started video yet."""
+    batch = db.get(Batch, batch_id)
+    if not batch:
+        raise HTTPException(404, "Batch not found")
+    jobs = db.query(ProductJob).filter(ProductJob.batch_id == batch.id).order_by(ProductJob.created_at.asc()).all()
+    queued = 0
+    for job in jobs:
+        if job.image_status != "completed":
+            continue
+        if job.video_status not in {"pending", ""} or job.upscale_status == "completed":
+            continue
+        # Clicking Generate all videos is the operator's batch-level approval action.
+        job.approved = True
+        job.video_error = None
+        job.stage = "ready_for_video"
+        db.add(job)
+        db.flush()
+        enqueue_task(db, "submit_video", job_id=job.id, batch_id=job.batch_id, priority=30, max_attempts=2)
+        queued += 1
+    if not queued:
+        raise HTTPException(400, "No completed images are waiting for video generation.")
+    db.commit()
+    db.refresh(batch)
+    return batch_out(batch, db)
 
 
 @app.post("/batches/{batch_id}/sync-sheet", response_model=BatchOut, dependencies=[Depends(require_api_key)])
