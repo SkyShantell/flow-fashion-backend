@@ -21,6 +21,7 @@ from backend.schemas import (
     JobOut,
     RegenerateJobRequest,
     RetryJobRequest,
+    SelectProductRefsRequest,
 )
 from backend.services import sheets
 from backend.tasks import enqueue_task, run_one_claimed_task
@@ -67,6 +68,9 @@ def job_out(job: ProductJob) -> JobOut:
         product_url=job.product_url,
         product_id=job.product_id,
         focus=job.focus,
+        listing_images=list(job.listing_images or []),
+        review_images=list(job.review_images or []),
+        selected_refs=list(job.selected_refs or []),
         stage=job.stage or "",
         approved=bool(job.approved),
         image_status=job.image_status or "pending",
@@ -270,6 +274,54 @@ def import_from_scanner(batch_id: str, req: ImportScannerRequest, db: Session = 
         out["scanner_mark_warning"] = mark_error
         return out
     return batch_out(batch, db)
+
+
+@app.post("/jobs/{job_id}/references", response_model=JobOut, dependencies=[Depends(require_api_key)])
+def select_product_references(job_id: str, req: SelectProductRefsRequest, db: Session = Depends(get_db)):
+    job = db.get(ProductJob, job_id)
+    if not job:
+        raise HTTPException(404, "Job not found")
+
+    refs = []
+    for raw in req.refs:
+        ref = str(raw or "").strip()
+        if ref and ref not in refs:
+            refs.append(ref)
+
+    if not refs:
+        raise HTTPException(400, "Select at least one product photo")
+    if len(refs) > settings().max_product_refs:
+        raise HTTPException(400, f"Select no more than {settings().max_product_refs} product photos")
+
+    allowed = {str(x) for x in list(job.listing_images or []) + list(job.review_images or []) if str(x).strip()}
+    invalid = [ref for ref in refs if allowed and ref not in allowed]
+    if invalid:
+        raise HTTPException(400, "One or more selected photos are not from this imported product")
+
+    job.selected_refs = refs
+    # Force Flow reference uploads to be rebuilt when the user changes photos.
+    job.flow_product_ref_ids = []
+    job.ref_signature = None
+    job.approved = False
+    job.image_status = "pending"
+    job.image_error = None
+    job.image_job_id = None
+    job.image_media_id = None
+    job.image_url = None
+    job.video_status = "pending"
+    job.upscale_status = "pending"
+    job.stage = "ready_for_image"
+    db.add(job)
+    db.flush()
+
+    if req.start_generation:
+        job.stage = "queued_image"
+        db.add(job)
+        enqueue_task(db, "generate_image", job_id=job.id, batch_id=job.batch_id, priority=20, max_attempts=2, allow_duplicate=True)
+
+    db.commit()
+    db.refresh(job)
+    return job_out(job)
 
 
 @app.post("/jobs/{job_id}/approve", response_model=JobOut, dependencies=[Depends(require_api_key)])

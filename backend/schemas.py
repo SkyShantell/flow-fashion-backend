@@ -24,6 +24,11 @@ class ImportScannerRequest(BaseModel):
     start_generation: bool = True
 
 
+class SelectProductRefsRequest(BaseModel):
+    refs: list[str] = Field(default_factory=list)
+    start_generation: bool = True
+
+
 class ApproveJobRequest(BaseModel):
     approved: bool = True
     start_video: bool = True
@@ -44,6 +49,9 @@ class JobOut(BaseModel):
     product_url: str | None
     product_id: str | None
     focus: str | None
+    listing_images: list[str] = Field(default_factory=list)
+    review_images: list[str] = Field(default_factory=list)
+    selected_refs: list[str] = Field(default_factory=list)
     stage: str
     approved: bool
     image_status: str
