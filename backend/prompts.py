@@ -88,7 +88,8 @@ def normalize_motion_style(style: str | None, creator_profile: str = "Male") -> 
 def image_prompt(job, *, scene: str, refs_count: int, creator_profile: str = "Male") -> str:
     focus = getattr(job, "focus", None) or "outfit"
     product = getattr(job, "product_name", None) or "clothing"
-    ref_mentions = " ".join(f"@reference_{i}" for i in range(2, refs_count + 1))
+    product_ref_count = max(0, refs_count - 1)
+    product_ref_label = "reference image 2" if product_ref_count == 1 else f"reference images 2 through {refs_count}"
     scene_text = SCENES.get(scene, SCENES["Modern apartment mirror"])
     profile = (creator_profile or "Male").strip().lower()
 
@@ -129,15 +130,15 @@ def image_prompt(job, *, scene: str, refs_count: int, creator_profile: str = "Ma
     revision_rule = f"USER REVISION REQUEST: {revision}. Apply this while preserving the exact product and face-block rule." if revision else ""
 
     return clean_prompt(f"""
-    ABSOLUTE IDENTITY LOCK: @reference_1 is the ONE AND ONLY PERSON / AVATAR reference for this generation. The human subject in the final image MUST be the exact avatar from @reference_1. Preserve @reference_1's identity, skin tone, hair, body build, tattoos, visible personal features, and overall appearance. Do not create, blend with, substitute, or borrow the identity of any other person.
-    PRODUCT-REFERENCE FIREWALL: {ref_mentions} are PRODUCT / WARDROBE references only. If any of those product references contain a stock model, creator, mannequin-like person, or any human body, COMPLETELY IGNORE that person's identity, face, hair, skin, body shape, age, ethnicity, pose, accessories, and styling. Extract ONLY the actual product's design, color, graphic, pattern, fabric, construction, fit cues, seams, straps, hardware, labels, and proportions. NEVER use a person from a product photo as the model. NEVER blend a stock-photo person with @reference_1.
-    Ultrarealistic 9:16 mirror-selfie try-on image, authentic iPhone 16 Pro UGC look. The model is @reference_1 only. {gender_line}. {framing}.
+    REFERENCE ROLE RULE: Use the FIRST attached reference image as the ONLY source for the model/person's visual appearance. Keep that same person's skin tone, hair, body build, tattoos, and visible personal features. Do not copy the appearance of any person shown in later references.
+    PRODUCT REFERENCE RULE: Use {product_ref_label} ONLY to copy the product/wardrobe. If a product reference contains a stock model or other person, ignore that person's face, hair, skin, body, pose, accessories, and styling. Take only the actual product's color, graphic, pattern, fabric, construction, seams, straps, hardware, labels, proportions, and fit cues.
+    Ultrarealistic 9:16 mirror-selfie try-on image, authentic iPhone 16 Pro UGC look. {gender_line}. {framing}.
     Setting: {scene_text}. The setting must look like a real usable space, not a studio set, catalog backdrop, or CGI room.
-    The @reference_1 avatar holds a modern smartphone directly in front of the face. {face_block_rule()}
-    Dress @reference_1 in the exact same {product} shown by the product-only references {ref_mentions} -- preserve exact colors, graphics, pattern, fabric texture, fit, cut, seams, straps, labels, proportions and product-specific details. {focus_rule} {fallback} {back} {revision_rule}
+    The model from the first reference holds a modern smartphone directly in front of the face. {face_block_rule()}
+    Dress that model in the exact same {product} shown by the product references -- preserve exact colors, graphics, pattern, fabric texture, fit, cut, seams, straps, labels, proportions and product-specific details. {focus_rule} {fallback} {back} {revision_rule}
     Pose: {pose}. Natural mirror selfie stance, realistic body balance, no sexual pose.
     Realism: authentic iPhone 16 Pro UGC photo, natural skin texture where visible, realistic hands and fingers, believable fabric folds and seams, subtle sensor grain, mild phone-camera compression, no studio lighting, no glossy catalog look, no extra people, no duplicated limbs, no morphing, no text overlays, no prices, no added logos, no watermarks.
-    FINAL NON-NEGOTIABLE RULES: PERSON = @reference_1 AVATAR ONLY. PRODUCT = {ref_mentions} ONLY. PRODUCT-REFERENCE PEOPLE MUST NOT APPEAR OR INFLUENCE THE GENERATED PERSON. Preserve every product detail. NO FACE SHOWN. PHONE BLOCKS THE FACE COMPLETELY.
+    FINAL RULE: Keep the person from the FIRST reference only. Later references are wardrobe/product references only. Preserve every product detail. NO FACE SHOWN. PHONE BLOCKS THE FACE COMPLETELY.
     """)
 
 
