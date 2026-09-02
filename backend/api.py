@@ -9,7 +9,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, UploadFile, File, F
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
-from backend.config import settings
+from backend.config import google_service_account_info, settings
 from backend.db import SessionLocal, init_db
 from backend.models import Batch, ProductJob, QueueTask
 from backend.schemas import (
@@ -118,7 +118,7 @@ def health():
         "ok": True,
         "useapi": bool(cfg.useapi_token),
         "sociavault": bool(cfg.sociavault_api_key),
-        "google_sheet": bool(cfg.google_sheet_url),
+        "google_sheet": bool(cfg.google_sheet_auto_sync and cfg.google_sheet_url and google_service_account_info()),
         "drive_archive": bool(cfg.google_drive_archive_webhook_url and cfg.google_drive_archive_secret),
         "image_model": cfg.image_model,
         "video_model": cfg.video_model,
@@ -405,6 +405,30 @@ def retry_job(job_id: str, req: RetryJobRequest, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(job)
     return job_out(job)
+
+
+@app.post("/batches/{batch_id}/sync-sheet", response_model=BatchOut, dependencies=[Depends(require_api_key)])
+def sync_batch_sheet(batch_id: str, db: Session = Depends(get_db)):
+    """Queue Google Sheet sync for every product without changing production stages."""
+    cfg = settings()
+    if not cfg.google_sheet_auto_sync or not cfg.google_sheet_url or not google_service_account_info():
+        raise HTTPException(400, "Google Sheets auto-sync is not configured on the API service.")
+    batch = db.get(Batch, batch_id)
+    if not batch:
+        raise HTTPException(404, "Batch not found")
+    jobs = db.query(ProductJob).filter(ProductJob.batch_id == batch.id).all()
+    if not jobs:
+        raise HTTPException(400, "This batch has no products to sync.")
+    for job in jobs:
+        # Earlier builds surfaced sheet failures through drive_error. Clear only that legacy message.
+        if job.drive_error and "Google Sheets" in str(job.drive_error):
+            job.drive_error = None
+        db.add(job)
+        db.flush()
+        enqueue_task(db, "sync_sheet", job_id=job.id, batch_id=job.batch_id, priority=5, max_attempts=3, allow_duplicate=True)
+    db.commit()
+    db.refresh(batch)
+    return batch_out(batch, db)
 
 
 @app.post("/batches/{batch_id}/retry-failed", response_model=BatchOut, dependencies=[Depends(require_api_key)])
