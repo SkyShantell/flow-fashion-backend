@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import re
 
+SHOE_SHOWCASE_SCENE = "Dark luxury car interior"
+SHOE_SHOWCASE_MOTION = "Shoe Showcase — ASMR Rotation"
+
 SCENES = {
+    SHOE_SHOWCASE_SCENE: "a dark luxury car interior with black leather seats, chrome and gloss-black trim, a dark dashboard and center console, parked at dusk with soft ambient window light",
     "Modern apartment mirror": "a realistic modern upscale apartment with a large full-length mirror, warm ceiling lighting, neutral furniture, and believable lived-in details",
     "Walk-in closet": "a realistic upscale walk-in closet with dark wood shelving, folded clothes, soft warm recessed lighting, and a large full-length mirror",
     "Luxury bathroom mirror": "a realistic upscale bathroom with dark stone surfaces, a large clean mirror, warm ceiling light, and subtle hotel-like details",
@@ -31,7 +35,7 @@ CUSTOM_MOTION_STYLES = [
 ]
 # Keep old labels valid so existing batches created before V6 continue working.
 LEGACY_MOTION_STYLES = ["Calm", "Casual UGC", "Fit Check", "Detail Focus", "Streetwear", "High-energy", "Flashy"]
-MOTION_STYLES = list(dict.fromkeys(MALE_ACADEMY_STYLES + FEMALE_ACADEMY_STYLES + CUSTOM_MOTION_STYLES + LEGACY_MOTION_STYLES))
+MOTION_STYLES = list(dict.fromkeys([SHOE_SHOWCASE_MOTION] + MALE_ACADEMY_STYLES + FEMALE_ACADEMY_STYLES + CUSTOM_MOTION_STYLES + LEGACY_MOTION_STYLES))
 
 
 def clean_prompt(text: str) -> str:
@@ -54,6 +58,8 @@ def normalize_motion_style(style: str | None, creator_profile: str = "Male") -> 
     """Map pre-V6 labels onto the closest Academy/custom preset without breaking old batches."""
     profile = str(creator_profile or "Male").lower()
     value = str(style or "").strip()
+    if value == SHOE_SHOWCASE_MOTION:
+        return value
     if value in MALE_ACADEMY_STYLES + FEMALE_ACADEMY_STYLES + CUSTOM_MOTION_STYLES:
         # A batch can be switched between creator genders after creation. If an Academy label belongs
         # to the other gender, use the equivalent energy level for the active creator profile.
@@ -308,4 +314,44 @@ def video_prompt(job, *, creator_profile: str = "Male", video_style: str = "Acad
     Keep all movement physically possible within a single 8-second take. If every beat cannot fit cleanly, prioritize the hook, product detail, fit/view, and finish rather than rushing or morphing.
     The phone hand remains steady at face level throughout and must never reveal the face. Maintain realistic anatomy, garment physics and mirror geometry. The product must never change color, print, material, proportions, pieces, size, or branding. No zoom jump, no camera cut, no transformation, no extra people, no duplicate body parts, no text, subtitles, captions, music, speech or sound effects. Natural subtle iPhone handheld motion only.
     No bending, no squatting, no sexual poses. FINAL RULE: phone fully covers the face from start to finish. Preserve the exact outfit/product and background.
+    """)
+
+
+
+def shoe_showcase_image_prompt(job, *, refs_count: int, creator_profile: str = "Female") -> str:
+    """Start-frame prompt for the shoe-first dark-car showcase workflow.
+
+    Product references are the ONLY supplied references in this mode. There is no avatar.
+    The composition intentionally matches the reference-video DNA: hand + shoe + dark car,
+    tight close-up, product brightest, no face/body, no rendered overlay text.
+    """
+    product = str(getattr(job, "product_name", None) or "the exact shoe")
+    hand = (
+        "A woman's hand with neat manicured nails, a gold chain bracelet and a dark or knit sleeve cuff"
+        if str(creator_profile or "Female").lower().startswith("f")
+        else "A man's hand with clean short nails, a minimal watch or bracelet and a dark sleeve cuff"
+    )
+    return clean_prompt(f"""
+    Create a photorealistic 9:16 vertical starter frame for a TikTok Shop shoe showcase inside a parked dark luxury car.
+    Use all {refs_count} supplied reference image(s) ONLY to preserve the exact shoe. Match {product} exactly: colorway, silhouette, upper material, pattern, stitching, sole shape and tread, heel, lining, closures, hardware and any physical branding already on the shoe. Do not redesign, recolor, resize, add, remove or merge product details.
+    Scene: black leather seats and dark interior surfaces with subtle chrome or gloss-black console/door trim. Moody low-key ambient light from the windows; the shoe is the brightest object. Editorial but casual, like a real phone shot in a parked car at dusk. No studio setup and no lifestyle props.
+    Composition: tight close-up, slightly overhead as if looking down toward the lap/seat. {hand} holds ONE shoe close to camera in a natural three-quarter front/top hero angle. Show enough of the front/top and side profile to establish shape and material while leaving room to rotate the shoe during video. Only hand, wrist and a small amount of forearm may appear. No face and no body above the forearm.
+    Stable handheld-phone realism with subtle imperfection, realistic anatomy, natural grip and believable scale. The shoe must remain fully in frame and dominate the image.
+    No generated text, captions, subtitles, overlays, signs, extra logos, watermarks, extra products, extra hands, extra people or animals. Physical branding already printed or molded on the referenced shoe may remain.
+    """)
+
+
+def shoe_showcase_video_prompt(job, *, creator_profile: str = "Female") -> str:
+    """Omni 1.1 prompt reconstructed from the supplied shoe showcase skill/reference videos."""
+    product = str(getattr(job, "product_name", None) or "the exact shoe")
+    hand = (
+        "A woman's hand with neat manicured nails and a gold chain bracelet, wrist emerging from a dark or knit sleeve"
+        if str(creator_profile or "Female").lower().startswith("f")
+        else "A man's hand with clean short nails and a minimal watch or bracelet, wrist emerging from a dark sleeve"
+    )
+    return clean_prompt(f"""
+    9:16 vertical, 10 seconds, one continuous unbroken shot, no cuts. Use the supplied approved start image as the exact first frame. Dark luxury car interior with black leather seats and subtle chrome or gloss-black console/door trim. Moody low-key ambient lighting; {product} stays the brightest element. Tight close-up, slightly overhead phone angle. Stable handheld feel with only subtle micro-movement. Silent: no audio, voiceover or sound effects.
+    [00:00-00:05] {hand} presents the exact shoe toward camera and begins a slow deliberate rotation from the front/top view toward the side profile. Preserve the exact color, pattern, materials, shape, stitching, sole, closures, hardware and physical branding from the approved start frame. Fingers cradle the shoe naturally. Hold readable angles briefly; the hand provides the motion while the camera remains roughly fixed.
+    [00:05-00:10] Continue the same uninterrupted rotation to reveal the most useful hidden shoe detail: interior/lining, heel/back construction, sole edge or tread, strap/lace hardware, depending on what is physically present. Do not invent features. Finish at a clean three-quarter front hero angle with a slight tilt so the upper and sole edge catch the ambient light. Movement remains slow, satisfying and ASMR-paced.
+    No face. No person above the forearm. No extra hands or people. No scene change, camera jump, zoom jump, morphing or product transformation. No generated text, captions, subtitles, overlays, signs, watermarks or added logos anywhere in frame. Physical branding already on the shoe may remain. Preserve the exact shoe throughout.
     """)

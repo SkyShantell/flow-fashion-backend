@@ -155,13 +155,13 @@ def generate_image(prompt: str, refs: list[str], email: str = "") -> dict:
     }
 
 
-def submit_video(image_media_id: str, prompt: str, email: str = "") -> dict:
+def submit_video(image_media_id: str, prompt: str, email: str = "", duration: int | None = None) -> dict:
     cfg = settings()
     body = {
         "model": cfg.video_model,
         "prompt": prompt,
         "aspectRatio": "portrait",
-        "duration": cfg.video_duration,
+        "duration": int(duration or cfg.video_duration),
         "resolution": cfg.video_native_resolution,
         "count": 1,
         "startImage": image_media_id,

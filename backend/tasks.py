@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from backend.config import settings
 from backend.db import session_scope
 from backend.models import Batch, ProductJob, QueueTask, utcnow
-from backend.prompts import default_motion_style, image_prompt, video_prompt
+from backend.prompts import default_motion_style, image_prompt, video_prompt, shoe_showcase_image_prompt, shoe_showcase_video_prompt
 from backend.services import drive, sheets, sociavault, useapi
 
 TERMINAL_TASK_STATUSES = {"done", "failed", "canceled"}
@@ -154,14 +154,14 @@ def _upload_avatar_if_needed(db: Session, batch: Batch) -> str:
     return batch.avatar_media_id
 
 
-def _ensure_product_refs(db: Session, job: ProductJob, avatar_media_id: str) -> list[str]:
+def _ensure_product_refs(db: Session, job: ProductJob, avatar_media_id: str | None = None) -> list[str]:
     selected = _as_list(job.selected_refs)
     if not selected:
         raise RuntimeError("No selected product reference images.")
     signature = hashlib.sha1("|".join(selected).encode("utf-8")).hexdigest()
     existing_refs = _as_list(job.flow_product_ref_ids)
     if job.ref_signature == signature and existing_refs:
-        return [avatar_media_id] + existing_refs
+        return ([avatar_media_id] if avatar_media_id else []) + existing_refs
     ids = []
     for url in selected[: settings().max_product_refs]:
         data, mime = sociavault.fetch_remote_image(str(url))
@@ -172,7 +172,7 @@ def _ensure_product_refs(db: Session, job: ProductJob, avatar_media_id: str) -> 
     job.ref_signature = signature
     db.add(job)
     db.flush()
-    return [avatar_media_id] + ids
+    return ([avatar_media_id] if avatar_media_id else []) + ids
 
 
 def run_import_product(db: Session, task: QueueTask) -> None:
@@ -189,7 +189,8 @@ def run_import_product(db: Session, task: QueueTask) -> None:
     job.listing_images = data["listing_images"]
     job.review_images = data["review_images"]
     job.selected_refs = data["selected_refs"]
-    job.focus = data["focus"]
+    batch = db.get(Batch, job.batch_id)
+    job.focus = "shoes" if batch and (batch.mode or "fashion_tryon") == "shoe_showcase" else data["focus"]
     job.stage = "imported"
     job.image_status = "pending"
     db.add(job)
@@ -214,10 +215,23 @@ def run_generate_image(db: Session, task: QueueTask) -> None:
     db.add(job)
     db.flush()
 
-    avatar_media_id = _upload_avatar_if_needed(db, batch)
-    refs = _ensure_product_refs(db, job, avatar_media_id)
+    if (batch.mode or "fashion_tryon") == "shoe_showcase":
+        # Shoe showcase uses product references only. No saved avatar/person reference is sent.
+        refs = _ensure_product_refs(db, job, None)
+        prompt_text = shoe_showcase_image_prompt(
+            job, refs_count=len(refs), creator_profile=batch.creator_profile or "Female"
+        )
+    else:
+        avatar_media_id = _upload_avatar_if_needed(db, batch)
+        refs = _ensure_product_refs(db, job, avatar_media_id)
+        prompt_text = image_prompt(
+            job,
+            scene=job.scene_override or batch.scene or "Modern apartment mirror",
+            refs_count=len(refs),
+            creator_profile=batch.creator_profile or "Male",
+        )
     result = useapi.generate_image(
-        image_prompt(job, scene=job.scene_override or batch.scene or "Modern apartment mirror", refs_count=len(refs), creator_profile=batch.creator_profile or "Male"),
+        prompt_text,
         refs,
         settings().google_flow_email,
     )
@@ -257,15 +271,19 @@ def run_submit_video(db: Session, task: QueueTask) -> None:
     db.flush()
 
     prompt_text = str((task.payload or {}).get("prompt_override") or "").strip()
+    shoe_mode = (batch.mode or "fashion_tryon") == "shoe_showcase"
     if not prompt_text:
-        prompt_text = video_prompt(job, creator_profile=batch.creator_profile or "Male", video_style=job.motion_style_override or batch.video_style or default_motion_style(batch.creator_profile or "Male"))
+        if shoe_mode:
+            prompt_text = shoe_showcase_video_prompt(job, creator_profile=batch.creator_profile or "Female")
+        else:
+            prompt_text = video_prompt(job, creator_profile=batch.creator_profile or "Male", video_style=job.motion_style_override or batch.video_style or default_motion_style(batch.creator_profile or "Male"))
     # Persist the exact submitted prompt on the queue task so the UI can show what the current video used
     # without requiring a database schema migration.
     task.payload = {**dict(task.payload or {}), "prompt_used": prompt_text}
     db.add(task)
     db.flush()
 
-    result = useapi.submit_video(job.image_media_id, prompt_text, settings().google_flow_email)
+    result = useapi.submit_video(job.image_media_id, prompt_text, settings().google_flow_email, duration=10 if shoe_mode else None)
     job.video_job_id = result["job_id"]
     job.video_status = str(result.get("status") or "created").lower()
     job.stage = "video_processing"
@@ -531,11 +549,15 @@ def run_task_by_id(task_id: str) -> str:
             return "done"
         except Exception as exc:
             error = str(exc)
+            summary = (
+                f"type={task.task_type} · job={task.job_id or '-'} · "
+                f"attempt={task.attempts}/{task.max_attempts} · error={error[:1800]}"
+            )
             if task.attempts < task.max_attempts:
                 _requeue(db, task, error)
-                return "requeued"
+                return "requeued · " + summary
             _fail_task(db, task, error)
-            return "failed"
+            return "failed · " + summary
 
 
 def run_one_claimed_task() -> str:

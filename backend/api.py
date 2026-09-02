@@ -28,7 +28,7 @@ from backend.schemas import (
     UpdateJobSettingsRequest,
 )
 from backend.services import sheets
-from backend.prompts import MOTION_STYLES, SCENES, default_motion_style, video_prompt
+from backend.prompts import MOTION_STYLES, SCENES, SHOE_SHOWCASE_MOTION, SHOE_SHOWCASE_SCENE, default_motion_style, video_prompt, shoe_showcase_video_prompt
 from backend.tasks import enqueue_task, run_one_claimed_task
 
 app = FastAPI(title="Flow Try-On Factory Phase 1 API", version="0.1.0")
@@ -131,6 +131,7 @@ def batch_out(batch: Batch, db: Session) -> BatchOut:
     return BatchOut(
         id=batch.id,
         name=batch.name,
+        mode=batch.mode or "fashion_tryon",
         scene=batch.scene,
         scene_pool=_scene_pool(batch),
         creator_profile=batch.creator_profile,
@@ -194,18 +195,30 @@ def delete_saved_avatar(avatar_id: str, db: Session = Depends(get_db)):
 
 @app.post("/batches", response_model=BatchOut, dependencies=[Depends(require_api_key)])
 def create_batch(req: CreateBatchRequest, db: Session = Depends(get_db)):
-    requested_scenes = [x for x in req.scene_pool if x in SCENES] or ([req.scene] if req.scene in SCENES else ["Modern apartment mirror"])
-    default_motion = default_motion_style(req.creator_profile)
-    requested_motions = [x for x in req.motion_pool if x in MOTION_STYLES] or ([req.video_style] if req.video_style in MOTION_STYLES else [default_motion])
+    mode = "shoe_showcase" if str(req.mode or "").strip().lower() == "shoe_showcase" else "fashion_tryon"
+    if mode == "shoe_showcase":
+        requested_scenes = [SHOE_SHOWCASE_SCENE]
+        requested_motions = [SHOE_SHOWCASE_MOTION]
+        creator_profile = "Male" if str(req.creator_profile or "").lower().startswith("m") else "Female"
+        avatar_b64 = None
+    else:
+        requested_scenes = [x for x in req.scene_pool if x in SCENES and x != SHOE_SHOWCASE_SCENE] or ([req.scene] if req.scene in SCENES and req.scene != SHOE_SHOWCASE_SCENE else ["Modern apartment mirror"])
+        default_motion = default_motion_style(req.creator_profile)
+        requested_motions = [x for x in req.motion_pool if x in MOTION_STYLES and x != SHOE_SHOWCASE_MOTION] or ([req.video_style] if req.video_style in MOTION_STYLES and req.video_style != SHOE_SHOWCASE_MOTION else [default_motion])
+        creator_profile = req.creator_profile
+        avatar_b64 = req.avatar_b64
+        if not avatar_b64:
+            raise HTTPException(400, "Fashion Try-On batches require an avatar image")
     batch = Batch(
         name=req.name,
+        mode=mode,
         scene=requested_scenes[0],
         scene_pool=requested_scenes,
-        creator_profile=req.creator_profile,
+        creator_profile=creator_profile,
         video_style=requested_motions[0],
         motion_pool=requested_motions,
         auto_approve=req.auto_approve,
-        avatar_b64=req.avatar_b64,
+        avatar_b64=avatar_b64,
         avatar_mime=req.avatar_mime or "image/jpeg",
     )
     db.add(batch)
@@ -217,6 +230,7 @@ def create_batch(req: CreateBatchRequest, db: Session = Depends(get_db)):
 @app.post("/batches/form", response_model=BatchOut, dependencies=[Depends(require_api_key)])
 def create_batch_form(
     name: str = Form("Flow batch"),
+    mode: str = Form("fashion_tryon"),
     scene: str = Form("Modern apartment mirror"),
     creator_profile: str = Form("Male"),
     video_style: str = Form("Academy — Boss / Calm"),
@@ -230,13 +244,25 @@ def create_batch_form(
         data = avatar.file.read()
         avatar_b64 = base64.b64encode(data).decode("ascii")
         avatar_mime = avatar.content_type or "image/jpeg"
+    resolved_mode = "shoe_showcase" if str(mode or "").strip().lower() == "shoe_showcase" else "fashion_tryon"
+    if resolved_mode == "shoe_showcase":
+        resolved_scene = SHOE_SHOWCASE_SCENE
+        resolved_motion = SHOE_SHOWCASE_MOTION
+        avatar_b64 = None
+        creator_profile = "Male" if str(creator_profile or "").lower().startswith("m") else "Female"
+    else:
+        resolved_scene = scene if scene in SCENES and scene != SHOE_SHOWCASE_SCENE else "Modern apartment mirror"
+        resolved_motion = video_style if video_style in MOTION_STYLES and video_style != SHOE_SHOWCASE_MOTION else default_motion_style(creator_profile)
+        if not avatar_b64:
+            raise HTTPException(400, "Fashion Try-On batches require an avatar image")
     batch = Batch(
         name=name,
-        scene=scene if scene in SCENES else "Modern apartment mirror",
-        scene_pool=[scene if scene in SCENES else "Modern apartment mirror"],
+        mode=resolved_mode,
+        scene=resolved_scene,
+        scene_pool=[resolved_scene],
         creator_profile=creator_profile,
-        video_style=video_style if video_style in MOTION_STYLES else default_motion_style(creator_profile),
-        motion_pool=[video_style if video_style in MOTION_STYLES else default_motion_style(creator_profile)],
+        video_style=resolved_motion,
+        motion_pool=[resolved_motion],
         auto_approve=auto_approve,
         avatar_b64=avatar_b64,
         avatar_mime=avatar_mime,
@@ -363,6 +389,8 @@ def select_product_references(job_id: str, req: SelectProductRefsRequest, db: Se
     job = db.get(ProductJob, job_id)
     if not job:
         raise HTTPException(404, "Job not found")
+    batch = db.get(Batch, job.batch_id)
+    shoe_mode = bool(batch and (batch.mode or "fashion_tryon") == "shoe_showcase")
 
     refs = []
     for raw in req.refs:
@@ -380,21 +408,26 @@ def select_product_references(job_id: str, req: SelectProductRefsRequest, db: Se
     if invalid:
         raise HTTPException(400, "One or more selected photos are not from this imported product")
 
-    if req.focus is not None:
-        focus = str(req.focus).strip().lower()
-        if focus not in FOCUS_VALUES:
-            raise HTTPException(400, "Unknown product type")
-        job.focus = focus
-    if req.scene is not None:
-        scene = str(req.scene).strip()
-        if scene not in SCENES:
-            raise HTTPException(400, "Unknown background setting")
-        job.scene_override = scene
-    if req.motion_style is not None:
-        motion = str(req.motion_style).strip()
-        if motion not in MOTION_STYLES:
-            raise HTTPException(400, "Unknown motion style")
-        job.motion_style_override = motion
+    if shoe_mode:
+        job.focus = "shoes"
+        job.scene_override = SHOE_SHOWCASE_SCENE
+        job.motion_style_override = SHOE_SHOWCASE_MOTION
+    else:
+        if req.focus is not None:
+            focus = str(req.focus).strip().lower()
+            if focus not in FOCUS_VALUES:
+                raise HTTPException(400, "Unknown product type")
+            job.focus = focus
+        if req.scene is not None:
+            scene = str(req.scene).strip()
+            if scene not in SCENES or scene == SHOE_SHOWCASE_SCENE:
+                raise HTTPException(400, "Unknown background setting")
+            job.scene_override = scene
+        if req.motion_style is not None:
+            motion = str(req.motion_style).strip()
+            if motion not in MOTION_STYLES or motion == SHOE_SHOWCASE_MOTION:
+                raise HTTPException(400, "Unknown motion style")
+            job.motion_style_override = motion
 
     job.selected_refs = refs
     # Force Flow reference uploads to be rebuilt when the user changes photos.
@@ -458,6 +491,8 @@ def _default_video_prompt(job: ProductJob, db: Session) -> str:
     batch = db.get(Batch, job.batch_id)
     if not batch:
         raise HTTPException(404, "Batch not found")
+    if (batch.mode or "fashion_tryon") == "shoe_showcase":
+        return shoe_showcase_video_prompt(job, creator_profile=batch.creator_profile or "Female")
     return video_prompt(
         job,
         creator_profile=batch.creator_profile or "Male",

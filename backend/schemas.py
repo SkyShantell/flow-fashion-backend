@@ -18,6 +18,7 @@ class AvatarOut(BaseModel):
 
 class CreateBatchRequest(BaseModel):
     name: str = "Flow batch"
+    mode: str = "fashion_tryon"
     scene: str = "Modern apartment mirror"
     scene_pool: list[str] = Field(default_factory=list)
     creator_profile: str = "Male"
@@ -98,6 +99,7 @@ class JobOut(BaseModel):
 class BatchOut(BaseModel):
     id: str
     name: str | None
+    mode: str = "fashion_tryon"
     scene: str | None
     scene_pool: list[str] = Field(default_factory=list)
     creator_profile: str | None

@@ -34,6 +34,7 @@ class Batch(Base):
     id = Column(String(64), primary_key=True, default=lambda: new_id("batch"))
     name = Column(String(200), default="Flow batch")
     source = Column(String(80), default="manual")
+    mode = Column(String(80), default="fashion_tryon")
     scene = Column(String(120), default="Modern apartment mirror")
     scene_pool = Column(JSON, default=list)
     creator_profile = Column(String(40), default="Male")
