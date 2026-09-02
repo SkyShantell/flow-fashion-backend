@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import io
+import json
 import time
 from urllib.parse import quote
 
@@ -20,17 +21,39 @@ def flow_headers(token: str | None = None, json_content: bool = False) -> dict:
 
 
 def parse_error(resp: requests.Response) -> str:
+    """Return the most useful provider error without exposing auth headers/tokens."""
+    raw_text = (resp.text or "").strip()
     try:
         payload = resp.json()
-        if isinstance(payload, dict):
-            err = payload.get("error") or payload.get("message") or payload.get("detail")
-            if isinstance(err, dict):
-                err = err.get("message") or str(err)
-            if err:
-                return str(err)[:1200]
-        return str(payload)[:1200]
     except Exception:
-        return (resp.text or f"HTTP {resp.status_code}")[:1200]
+        return (raw_text or f"HTTP {resp.status_code}")[:2200]
+
+    if not isinstance(payload, dict):
+        return str(payload)[:2200]
+
+    err = payload.get("error") or payload.get("message") or payload.get("detail")
+    if isinstance(err, dict):
+        err = err.get("message") or err.get("error") or str(err)
+
+    # useapi sometimes puts the useful Google/Flow failure details in nested
+    # response/operations/media fields while the top-level error is only
+    # "API error: 400". Include those fields so Railway logs reveal the cause.
+    diagnostic = {}
+    for key in ("code", "response", "operations", "media", "status", "jobId", "jobid"):
+        if key in payload and payload.get(key) not in (None, "", [], {}):
+            diagnostic[key] = payload.get(key)
+
+    parts = []
+    if err:
+        parts.append(str(err))
+    if diagnostic:
+        try:
+            parts.append("details=" + json.dumps(diagnostic, ensure_ascii=False, default=str))
+        except Exception:
+            parts.append("details=" + str(diagnostic))
+    if not parts:
+        parts.append(str(payload))
+    return " | ".join(parts)[:2200]
 
 
 def request_json(method: str, url: str, *, headers=None, params=None, json_body=None, data=None, timeout=180, retries=2) -> dict:
