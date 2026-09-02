@@ -126,6 +126,33 @@ def upload_asset(image_bytes: bytes, mime: str, email: str = "") -> str:
     return str(media)
 
 
+
+def upload_video_asset(video_bytes: bytes, email: str = "") -> str:
+    """Upload an already-rendered MP4 back to Flow assets so the dashboard has a durable media id/url."""
+    cfg = settings()
+    if not cfg.useapi_token:
+        raise RuntimeError("Missing USEAPI_TOKEN")
+    if not video_bytes:
+        raise RuntimeError("No video bytes to upload")
+    url = f"{cfg.flow_base}/assets"
+    if email:
+        url += "/" + quote(email, safe="")
+    resp = requests.post(
+        url,
+        headers={**flow_headers(cfg.useapi_token), "Content-Type": "video/mp4"},
+        data=video_bytes,
+        timeout=240,
+    )
+    if resp.status_code >= 400:
+        raise RuntimeError(f"Flow video asset upload failed — HTTP {resp.status_code}: {parse_error(resp)}")
+    payload = resp.json()
+    media = payload.get("mediaGenerationId")
+    if isinstance(media, dict):
+        media = media.get("mediaGenerationId")
+    if not media:
+        raise RuntimeError("Flow uploaded the stitched MP4 but returned no mediaGenerationId.")
+    return str(media)
+
 def generate_image(prompt: str, refs: list[str], email: str = "") -> dict:
     cfg = settings()
     body = {

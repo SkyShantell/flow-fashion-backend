@@ -13,10 +13,86 @@ from sqlalchemy.orm import Session
 from backend.config import settings
 from backend.db import session_scope
 from backend.models import Batch, ProductJob, QueueTask, utcnow
-from backend.prompts import default_motion_style, image_prompt, video_prompt, shoe_showcase_image_prompt, shoe_showcase_video_prompt
-from backend.services import drive, sheets, sociavault, useapi
+from backend.prompts import (
+    default_motion_style, image_prompt, video_prompt, shoe_showcase_image_prompt, shoe_showcase_video_prompt,
+    shoe_editorial_frame_prompt, shoe_editorial_clip_prompt,
+)
+from backend.services import drive, editorial, sheets, sociavault, useapi
 
 TERMINAL_TASK_STATUSES = {"done", "failed", "canceled"}
+EDITORIAL_SHOT_ORDER = ("A", "B", "C")
+
+
+def _editorial_shots(job: ProductJob) -> list[dict]:
+    raw = job.editorial_shots or []
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except Exception:
+            raw = []
+    return [dict(x) for x in raw if isinstance(x, dict)]
+
+
+def _default_editorial_shots() -> list[dict]:
+    roles = {"A": "opening", "B": "showcase", "C": "detail"}
+    return [
+        {
+            "shot": shot, "role": roles[shot],
+            "image_status": "pending", "image_media_id": "", "image_url": "", "image_error": "",
+            "video_status": "pending", "video_job_id": "", "video_media_id": "", "video_url": "", "video_error": "",
+            "upscale_status": "pending", "upscale_job_id": "", "upscaled_media_id": "", "upscaled_url": "", "upscale_error": "",
+        }
+        for shot in EDITORIAL_SHOT_ORDER
+    ]
+
+
+def _ensure_editorial_shots(job: ProductJob) -> list[dict]:
+    shots = _editorial_shots(job)
+    by = {str(x.get("shot") or "").upper(): x for x in shots}
+    defaults = {x["shot"]: x for x in _default_editorial_shots()}
+    merged = []
+    for shot in EDITORIAL_SHOT_ORDER:
+        item = dict(defaults[shot])
+        item.update(by.get(shot, {}))
+        item["shot"] = shot
+        merged.append(item)
+    job.editorial_shots = merged
+    return merged
+
+
+def _update_editorial_shot(job: ProductJob, shot: str, **updates) -> dict:
+    shot = str(shot or "A").upper()
+    shots = _ensure_editorial_shots(job)
+    out = []
+    target = None
+    for item in shots:
+        item = dict(item)
+        if str(item.get("shot") or "").upper() == shot:
+            item.update(updates)
+            target = item
+        out.append(item)
+    job.editorial_shots = out
+    if target is None:
+        raise RuntimeError(f"Unknown editorial shot {shot}")
+    return target
+
+
+def _editorial_shot(job: ProductJob, shot: str) -> dict:
+    shot = str(shot or "A").upper()
+    for item in _ensure_editorial_shots(job):
+        if str(item.get("shot") or "").upper() == shot:
+            return dict(item)
+    raise RuntimeError(f"Unknown editorial shot {shot}")
+
+
+def _all_editorial(job: ProductJob, key: str, value: str = "completed") -> bool:
+    shots = _ensure_editorial_shots(job)
+    return len(shots) == 3 and all(str(x.get(key) or "") == value for x in shots)
+
+
+def _is_shoe_batch(db: Session, job: ProductJob) -> bool:
+    batch = db.get(Batch, job.batch_id)
+    return bool(batch and (batch.mode or "fashion_tryon") == "shoe_showcase")
 
 
 def _now() -> datetime:
@@ -89,26 +165,47 @@ def _fail_task(db: Session, task: QueueTask, error: str) -> None:
     task.error = str(error)[:4000]
     task.locked_at = None
     db.add(task)
-    if task.job_id:
-        job = db.get(ProductJob, task.job_id)
-        if job:
-            job.failure_count = int(job.failure_count or 0) + 1
-            if task.task_type in {"import_product", "generate_image"}:
-                job.image_status = "failed"
-                job.image_error = str(error)[:4000]
-                job.stage = "failed"
-            elif task.task_type in {"submit_video", "poll_video"}:
-                job.video_status = "failed"
-                job.video_error = str(error)[:4000]
-                job.stage = "failed"
-            elif task.task_type in {"submit_upscale", "poll_upscale"}:
-                job.upscale_status = "failed"
-                job.upscale_error = str(error)[:4000]
-                job.stage = "failed"
-            elif task.task_type == "archive_media":
-                job.drive_error = str(error)[:4000]
-            db.add(job)
-
+    if not task.job_id:
+        return
+    job = db.get(ProductJob, task.job_id)
+    if not job:
+        return
+    job.failure_count = int(job.failure_count or 0) + 1
+    shot = str((task.payload or {}).get("shot") or "").upper()
+    if task.task_type == "generate_editorial_frame" and shot:
+        _update_editorial_shot(job, shot, image_status="failed", image_error=str(error)[:4000])
+        job.image_status = "failed"
+        job.image_error = str(error)[:4000]
+        job.stage = "failed"
+    elif task.task_type in {"submit_editorial_clip", "poll_editorial_clip"} and shot:
+        _update_editorial_shot(job, shot, video_status="failed", video_error=str(error)[:4000])
+        job.video_status = "failed"
+        job.video_error = str(error)[:4000]
+        job.stage = "failed"
+    elif task.task_type in {"submit_editorial_upscale", "poll_editorial_upscale"} and shot:
+        _update_editorial_shot(job, shot, upscale_status="failed", upscale_error=str(error)[:4000])
+        job.upscale_status = "failed"
+        job.upscale_error = str(error)[:4000]
+        job.stage = "failed"
+    elif task.task_type == "stitch_editorial_video":
+        job.video_status = "failed"
+        job.video_error = str(error)[:4000]
+        job.stage = "failed"
+    elif task.task_type in {"import_product", "generate_image"}:
+        job.image_status = "failed"
+        job.image_error = str(error)[:4000]
+        job.stage = "failed"
+    elif task.task_type in {"submit_video", "poll_video"}:
+        job.video_status = "failed"
+        job.video_error = str(error)[:4000]
+        job.stage = "failed"
+    elif task.task_type in {"submit_upscale", "poll_upscale"}:
+        job.upscale_status = "failed"
+        job.upscale_error = str(error)[:4000]
+        job.stage = "failed"
+    elif task.task_type == "archive_media":
+        job.drive_error = str(error)[:4000]
+    db.add(job)
 
 def claim_next_task(db: Session) -> QueueTask | None:
     # Reset tasks that were left running after a crash/redeploy.
@@ -197,7 +294,15 @@ def run_import_product(db: Session, task: QueueTask) -> None:
     db.flush()
 
     if task.payload.get("start_generation", True):
-        enqueue_task(db, "generate_image", job_id=job.id, batch_id=job.batch_id, priority=20, max_attempts=2)
+        if batch and (batch.mode or "fashion_tryon") == "shoe_showcase":
+            job.editorial_shots = _default_editorial_shots()
+            job.image_status = "processing"
+            job.stage = "editorial_frames_queued"
+            db.add(job)
+            db.flush()
+            enqueue_task(db, "generate_editorial_frame", job_id=job.id, batch_id=job.batch_id, payload={"shot": "A"}, priority=20, max_attempts=2)
+        else:
+            enqueue_task(db, "generate_image", job_id=job.id, batch_id=job.batch_id, priority=20, max_attempts=2)
 
 
 def run_generate_image(db: Session, task: QueueTask) -> None:
@@ -207,6 +312,11 @@ def run_generate_image(db: Session, task: QueueTask) -> None:
     batch = db.get(Batch, job.batch_id)
     if not batch:
         raise RuntimeError("Batch no longer exists.")
+    if (batch.mode or "fashion_tryon") == "shoe_showcase":
+        task.payload = {**dict(task.payload or {}), "shot": str((task.payload or {}).get("shot") or "A").upper()}
+        db.add(task)
+        db.flush()
+        return run_generate_editorial_frame(db, task)
 
     job.stage = "generating_image"
     job.image_status = "processing"
@@ -251,6 +361,420 @@ def run_generate_image(db: Session, task: QueueTask) -> None:
     enqueue_task(db, "sync_sheet", job_id=job.id, batch_id=job.batch_id, priority=300, max_attempts=2, allow_duplicate=True)
 
 
+
+def run_generate_editorial_frame(db: Session, task: QueueTask) -> None:
+    job = db.get(ProductJob, task.job_id)
+    if not job:
+        raise RuntimeError("Product job no longer exists.")
+    batch = db.get(Batch, job.batch_id)
+    if not batch or (batch.mode or "fashion_tryon") != "shoe_showcase":
+        raise RuntimeError("Editorial frames are only available for Shoe Showcase batches.")
+
+    shot = str((task.payload or {}).get("shot") or "A").upper()
+    if shot not in EDITORIAL_SHOT_ORDER:
+        raise RuntimeError("Editorial shot must be A, B or C.")
+
+    _ensure_editorial_shots(job)
+    _update_editorial_shot(job, shot, image_status="processing", image_error="")
+    job.image_status = "processing"
+    job.image_error = None
+    job.approved = False
+    job.stage = f"editorial_frame_{shot.lower()}_processing"
+    db.add(job)
+    db.flush()
+
+    product_refs = _ensure_product_refs(db, job, None)
+    refs = list(product_refs)
+    if shot in {"B", "C"}:
+        opener = _editorial_shot(job, "A")
+        opener_media = str(opener.get("image_media_id") or "").strip()
+        if not opener_media:
+            raise RuntimeError("Opening frame A must finish before frames B/C can use it for shoe consistency.")
+        # Keep original product refs primary; add the approved opener as a consistency reference.
+        refs = refs[: settings().max_product_refs] + [opener_media]
+
+    revision = str((task.payload or {}).get("instruction") or "").strip()
+    prompt_text = shoe_editorial_frame_prompt(
+        job,
+        shot=shot,
+        refs_count=len(refs),
+        creator_profile=batch.creator_profile or "Female",
+        revision=revision,
+    )
+    task.payload = {**dict(task.payload or {}), "shot": shot, "prompt_used": prompt_text}
+    db.add(task)
+    db.flush()
+
+    result = useapi.generate_image(prompt_text, refs, settings().google_flow_email)
+    media_id = str(result.get("media_id") or "")
+    image_url = str(result.get("url") or "") or useapi.resolve_asset_url(media_id)
+    _update_editorial_shot(
+        job,
+        shot,
+        image_status="completed",
+        image_media_id=media_id,
+        image_url=image_url,
+        image_error="",
+        image_seed=result.get("seed") or "",
+    )
+
+    # Preserve the opener in the legacy image fields so existing cards, Sheets and Drive
+    # still have a primary image without understanding the editorial JSON structure.
+    if shot == "A":
+        job.image_job_id = result.get("job_id")
+        job.image_media_id = media_id
+        job.image_url = image_url
+        job.image_seed = result.get("seed")
+        # Frame A establishes product consistency. Generate B then C sequentially so
+        # JSON shot state cannot be overwritten by concurrent workers on the same product.
+        next_item = _editorial_shot(job, "B")
+        if str(next_item.get("image_status") or "pending") in {"pending", "failed"}:
+            enqueue_task(
+                db, "generate_editorial_frame", job_id=job.id, batch_id=job.batch_id,
+                payload={"shot": "B"}, priority=21, max_attempts=2, allow_duplicate=True,
+            )
+    elif shot == "B":
+        next_item = _editorial_shot(job, "C")
+        if str(next_item.get("image_status") or "pending") in {"pending", "failed"}:
+            enqueue_task(
+                db, "generate_editorial_frame", job_id=job.id, batch_id=job.batch_id,
+                payload={"shot": "C"}, priority=21, max_attempts=2, allow_duplicate=True,
+            )
+
+    if _all_editorial(job, "image_status"):
+        job.image_status = "completed"
+        job.image_error = None
+        job.stage = "awaiting_editorial_review"
+    else:
+        job.stage = "generating_editorial_frames"
+    db.add(job)
+    db.flush()
+    enqueue_task(db, "sync_sheet", job_id=job.id, batch_id=job.batch_id, priority=300, max_attempts=2, allow_duplicate=True)
+
+
+def _queue_editorial_video(db: Session, job: ProductJob, *, only_shot: str | None = None, prompt_override: str = "") -> None:
+    batch = db.get(Batch, job.batch_id)
+    if not batch or (batch.mode or "fashion_tryon") != "shoe_showcase":
+        raise RuntimeError("Editorial video is only available for Shoe Showcase batches.")
+    if not _all_editorial(job, "image_status"):
+        raise RuntimeError("All three editorial frames must be completed before generating the video.")
+
+    targets = [str(only_shot).upper()] if only_shot else list(EDITORIAL_SHOT_ORDER)
+    for shot in targets:
+        item = _editorial_shot(job, shot)
+        if not item.get("image_media_id"):
+            raise RuntimeError(f"Editorial frame {shot} has no Flow media ID.")
+        _update_editorial_shot(
+            job, shot,
+            video_status="pending", video_job_id="", video_media_id="", video_url="", video_error="",
+            upscale_status="pending", upscale_job_id="", upscaled_media_id="", upscaled_url="", upscale_error="",
+        )
+
+    # Run A→B→C sequentially for a single product. Different products can still run in
+    # parallel across worker concurrency, but one product never has competing JSON writes.
+    first_shot = targets[0]
+    payload = {"shot": first_shot}
+    if prompt_override and only_shot:
+        payload["prompt_override"] = prompt_override
+    enqueue_task(
+        db, "submit_editorial_clip", job_id=job.id, batch_id=job.batch_id, payload=payload,
+        priority=30, max_attempts=2, allow_duplicate=True,
+    )
+
+    # Reset the final render whenever any editorial clip is re-run.
+    job.approved = True
+    job.video_status = "processing"
+    job.video_job_id = None
+    job.video_source_media_id = None
+    job.video_source_url = None
+    job.video_source_resolution = None
+    job.video_media_id = None
+    job.video_url = None
+    job.video_resolution = None
+    job.video_error = None
+    job.upscale_status = "processing"
+    job.upscale_job_id = None
+    job.upscale_error = None
+    job.drive_video_id = None
+    job.drive_video_url = None
+    job.drive_video_download_url = None
+    job.drive_error = None
+    job.stage = "editorial_clips_queued"
+    db.add(job)
+    db.flush()
+
+
+def run_submit_editorial_clip(db: Session, task: QueueTask) -> None:
+    job = db.get(ProductJob, task.job_id)
+    if not job:
+        raise RuntimeError("Product job no longer exists.")
+    batch = db.get(Batch, job.batch_id)
+    if not batch:
+        raise RuntimeError("Batch no longer exists.")
+    shot = str((task.payload or {}).get("shot") or "A").upper()
+    item = _editorial_shot(job, shot)
+    start_media = str(item.get("image_media_id") or "")
+    if not start_media:
+        raise RuntimeError(f"Editorial frame {shot} is missing its start-image media ID.")
+
+    prompt_override = str((task.payload or {}).get("prompt_override") or "").strip()
+    prompt_text = shoe_editorial_clip_prompt(
+        job,
+        shot=shot,
+        creator_profile=batch.creator_profile or "Female",
+        prompt_override=prompt_override,
+    )
+    task.payload = {**dict(task.payload or {}), "shot": shot, "prompt_used": prompt_text}
+    _update_editorial_shot(job, shot, video_status="created", video_error="", prompt_used=prompt_text)
+    job.video_attempts = int(job.video_attempts or 0) + 1
+    job.stage = f"editorial_clip_{shot.lower()}_submitting"
+    db.add(task)
+    db.add(job)
+    db.flush()
+
+    result = useapi.submit_video(start_media, prompt_text, settings().google_flow_email, duration=4)
+    _update_editorial_shot(job, shot, video_status=str(result.get("status") or "created").lower(), video_job_id=result["job_id"])
+    job.stage = "editorial_clips_processing"
+    db.add(job)
+    db.flush()
+    enqueue_task(
+        db,
+        "poll_editorial_clip",
+        job_id=job.id,
+        batch_id=job.batch_id,
+        payload={"shot": shot},
+        priority=40,
+        run_after=_now() + timedelta(seconds=settings().poll_seconds),
+        max_attempts=80,
+        allow_duplicate=True,
+    )
+
+
+def run_poll_editorial_clip(db: Session, task: QueueTask) -> None:
+    job = db.get(ProductJob, task.job_id)
+    if not job:
+        raise RuntimeError("Product job no longer exists.")
+    shot = str((task.payload or {}).get("shot") or "A").upper()
+    item = _editorial_shot(job, shot)
+    job_id = str(item.get("video_job_id") or "")
+    if not job_id:
+        raise RuntimeError(f"Editorial clip {shot} is missing its Omni job ID.")
+
+    result = useapi.parse_video_job(useapi.get_job(job_id))
+    status = str(result.get("status") or item.get("video_status") or "processing").lower()
+    updates = {"video_status": status}
+    if result.get("video_media_id"):
+        updates["video_media_id"] = result["video_media_id"]
+    if result.get("video_url"):
+        updates["video_url"] = result["video_url"]
+    if result.get("error"):
+        updates["video_error"] = result["error"]
+    _update_editorial_shot(job, shot, **updates)
+
+    if status == "completed":
+        media_id = str(_editorial_shot(job, shot).get("video_media_id") or "")
+        if not media_id:
+            raise RuntimeError(f"Editorial clip {shot} completed without a media ID.")
+        enqueue_task(
+            db,
+            "submit_editorial_upscale",
+            job_id=job.id,
+            batch_id=job.batch_id,
+            payload={"shot": shot},
+            priority=50,
+            max_attempts=2,
+            allow_duplicate=True,
+        )
+        job.stage = "editorial_clips_processing"
+        db.add(job)
+        db.flush()
+        return
+    if status == "failed":
+        raise RuntimeError(str(result.get("error") or f"Editorial clip {shot} generation failed."))
+
+    job.stage = "editorial_clips_processing"
+    db.add(job)
+    db.flush()
+    enqueue_task(
+        db,
+        "poll_editorial_clip",
+        job_id=job.id,
+        batch_id=job.batch_id,
+        payload={"shot": shot},
+        priority=40,
+        run_after=_now() + timedelta(seconds=settings().poll_seconds),
+        max_attempts=80,
+        allow_duplicate=True,
+    )
+
+
+def run_submit_editorial_upscale(db: Session, task: QueueTask) -> None:
+    job = db.get(ProductJob, task.job_id)
+    if not job:
+        raise RuntimeError("Product job no longer exists.")
+    shot = str((task.payload or {}).get("shot") or "A").upper()
+    item = _editorial_shot(job, shot)
+    source_id = str(item.get("video_media_id") or "")
+    if not source_id:
+        raise RuntimeError(f"Editorial clip {shot} has no source media ID to upscale.")
+    _update_editorial_shot(job, shot, upscale_status="created", upscale_error="")
+    job.upscale_attempts = int(job.upscale_attempts or 0) + 1
+    job.stage = "editorial_upscaling"
+    db.add(job)
+    db.flush()
+
+    result = useapi.submit_upscale(source_id, settings().video_final_resolution)
+    if result.get("status") == "completed" and (result.get("media_id") or result.get("url")):
+        media_id = str(result.get("media_id") or source_id)
+        _update_editorial_shot(
+            job,
+            shot,
+            upscale_status="completed",
+            upscaled_media_id=media_id,
+            upscaled_url=str(result.get("url") or useapi.resolve_asset_url(media_id) or ""),
+            upscale_error="",
+        )
+        db.add(job)
+        db.flush()
+        _maybe_queue_editorial_stitch(db, job)
+        return
+
+    _update_editorial_shot(job, shot, upscale_status=str(result.get("status") or "created").lower(), upscale_job_id=result["job_id"])
+    db.add(job)
+    db.flush()
+    enqueue_task(
+        db,
+        "poll_editorial_upscale",
+        job_id=job.id,
+        batch_id=job.batch_id,
+        payload={"shot": shot},
+        priority=60,
+        run_after=_now() + timedelta(seconds=settings().poll_seconds),
+        max_attempts=60,
+        allow_duplicate=True,
+    )
+
+
+def _maybe_queue_editorial_stitch(db: Session, job: ProductJob) -> None:
+    if _all_editorial(job, "upscale_status"):
+        job.stage = "editorial_ready_to_stitch"
+        db.add(job)
+        db.flush()
+        enqueue_task(db, "stitch_editorial_video", job_id=job.id, batch_id=job.batch_id, priority=70, max_attempts=3)
+        return
+
+    # After A finishes, start B; after B finishes, start C.
+    for shot in EDITORIAL_SHOT_ORDER:
+        item = _editorial_shot(job, shot)
+        if str(item.get("upscale_status") or "pending") == "completed":
+            continue
+        if str(item.get("video_status") or "pending") == "pending" and str(item.get("upscale_status") or "pending") == "pending":
+            enqueue_task(
+                db, "submit_editorial_clip", job_id=job.id, batch_id=job.batch_id,
+                payload={"shot": shot}, priority=30, max_attempts=2, allow_duplicate=True,
+            )
+            job.stage = "editorial_clips_processing"
+            db.add(job)
+            db.flush()
+            return
+        # This shot is already in flight; don't skip ahead.
+        return
+
+def run_poll_editorial_upscale(db: Session, task: QueueTask) -> None:
+    job = db.get(ProductJob, task.job_id)
+    if not job:
+        raise RuntimeError("Product job no longer exists.")
+    shot = str((task.payload or {}).get("shot") or "A").upper()
+    item = _editorial_shot(job, shot)
+    upscale_job_id = str(item.get("upscale_job_id") or "")
+    if not upscale_job_id:
+        raise RuntimeError(f"Editorial clip {shot} is missing its upscale job ID.")
+
+    result = useapi.parse_video_job(useapi.get_job(upscale_job_id))
+    status = str(result.get("status") or item.get("upscale_status") or "processing").lower()
+    updates = {"upscale_status": status}
+    if result.get("video_media_id"):
+        updates["upscaled_media_id"] = result["video_media_id"]
+    if result.get("video_url"):
+        updates["upscaled_url"] = result["video_url"]
+    if result.get("error"):
+        updates["upscale_error"] = result["error"]
+    _update_editorial_shot(job, shot, **updates)
+
+    if status == "completed":
+        completed = _editorial_shot(job, shot)
+        if not completed.get("upscaled_media_id"):
+            # Some synchronous/polled responses can retain the original id; use it as a final fallback.
+            _update_editorial_shot(job, shot, upscaled_media_id=completed.get("video_media_id") or "")
+        db.add(job)
+        db.flush()
+        _maybe_queue_editorial_stitch(db, job)
+        return
+    if status == "failed":
+        raise RuntimeError(str(result.get("error") or f"Editorial clip {shot} upscale failed."))
+
+    job.stage = "editorial_upscaling"
+    db.add(job)
+    db.flush()
+    enqueue_task(
+        db,
+        "poll_editorial_upscale",
+        job_id=job.id,
+        batch_id=job.batch_id,
+        payload={"shot": shot},
+        priority=60,
+        run_after=_now() + timedelta(seconds=settings().poll_seconds),
+        max_attempts=60,
+        allow_duplicate=True,
+    )
+
+
+def run_stitch_editorial_video(db: Session, task: QueueTask) -> None:
+    job = db.get(ProductJob, task.job_id)
+    if not job:
+        raise RuntimeError("Product job no longer exists.")
+    if not _all_editorial(job, "upscale_status"):
+        raise RuntimeError("All three editorial clips must be upscaled before stitching.")
+
+    job.stage = "stitching_editorial_video"
+    job.video_status = "processing"
+    job.upscale_status = "completed"
+    db.add(job)
+    db.flush()
+
+    clips: dict[str, bytes] = {}
+    for shot in EDITORIAL_SHOT_ORDER:
+        item = _editorial_shot(job, shot)
+        media_id = str(item.get("upscaled_media_id") or "")
+        if not media_id:
+            raise RuntimeError(f"Editorial clip {shot} has no upscaled media ID.")
+        raw, err = useapi.download_raw_asset(media_id)
+        if not raw:
+            raise RuntimeError(err or f"Could not download editorial clip {shot}.")
+        clips[shot] = raw
+
+    final_bytes = editorial.stitch_editorial_clips(clips)
+    final_media_id = useapi.upload_video_asset(final_bytes, settings().google_flow_email)
+    final_url = useapi.resolve_asset_url(final_media_id)
+
+    job.video_source_media_id = final_media_id
+    job.video_source_url = final_url
+    job.video_source_resolution = settings().video_final_resolution
+    job.video_media_id = final_media_id
+    job.video_url = final_url
+    job.video_resolution = settings().video_final_resolution
+    job.video_status = "completed"
+    job.upscale_status = "completed"
+    job.video_error = None
+    job.upscale_error = None
+    job.thumbnail_url = str(_editorial_shot(job, "C").get("image_url") or job.image_url or "")
+    job.stage = "video_complete"
+    db.add(job)
+    db.flush()
+    enqueue_task(db, "archive_media", job_id=job.id, batch_id=job.batch_id, priority=80, max_attempts=2)
+    enqueue_task(db, "sync_sheet", job_id=job.id, batch_id=job.batch_id, priority=300, max_attempts=2, allow_duplicate=True)
+
+
 def run_submit_video(db: Session, task: QueueTask) -> None:
     job = db.get(ProductJob, task.job_id)
     if not job:
@@ -272,6 +796,10 @@ def run_submit_video(db: Session, task: QueueTask) -> None:
 
     prompt_text = str((task.payload or {}).get("prompt_override") or "").strip()
     shoe_mode = (batch.mode or "fashion_tryon") == "shoe_showcase"
+    if shoe_mode:
+        _queue_editorial_video(db, job)
+        enqueue_task(db, "sync_sheet", job_id=job.id, batch_id=job.batch_id, priority=300, max_attempts=2, allow_duplicate=True)
+        return
     if not prompt_text:
         if shoe_mode:
             prompt_text = shoe_showcase_video_prompt(job, creator_profile=batch.creator_profile or "Female")
@@ -519,6 +1047,12 @@ def run_sync_sheet(db: Session, task: QueueTask) -> None:
 HANDLERS: dict[str, Callable[[Session, QueueTask], None]] = {
     "import_product": run_import_product,
     "generate_image": run_generate_image,
+    "generate_editorial_frame": run_generate_editorial_frame,
+    "submit_editorial_clip": run_submit_editorial_clip,
+    "poll_editorial_clip": run_poll_editorial_clip,
+    "submit_editorial_upscale": run_submit_editorial_upscale,
+    "poll_editorial_upscale": run_poll_editorial_upscale,
+    "stitch_editorial_video": run_stitch_editorial_video,
     "submit_video": run_submit_video,
     "poll_video": run_poll_video,
     "submit_upscale": run_submit_upscale,

@@ -42,6 +42,7 @@ def _add_missing_columns() -> None:
             "ALTER TABLE batches ADD COLUMN IF NOT EXISTS motion_pool JSON",
             "ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS scene_override VARCHAR(120)",
             "ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS motion_style_override VARCHAR(80)",
+            "ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS editorial_shots JSON",
         ]
         with engine.begin() as conn:
             for sql in statements:
@@ -58,6 +59,7 @@ def _add_missing_columns() -> None:
         "product_jobs": {
             "scene_override": "VARCHAR(120)",
             "motion_style_override": "VARCHAR(80)",
+            "editorial_shots": "JSON",
         },
     }
     with engine.begin() as conn:

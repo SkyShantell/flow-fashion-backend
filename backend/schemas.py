@@ -71,6 +71,11 @@ class RegenerateVideoRequest(BaseModel):
     prompt: str = ""
 
 
+class EditorialRegenerateRequest(BaseModel):
+    instruction: str = ""
+    prompt: str = ""
+
+
 class JobOut(BaseModel):
     id: str
     batch_id: str
@@ -83,6 +88,7 @@ class JobOut(BaseModel):
     listing_images: list[str] = Field(default_factory=list)
     review_images: list[str] = Field(default_factory=list)
     selected_refs: list[str] = Field(default_factory=list)
+    editorial_shots: list[dict] = Field(default_factory=list)
     stage: str
     approved: bool
     image_status: str

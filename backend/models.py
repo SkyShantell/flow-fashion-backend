@@ -70,6 +70,7 @@ class ProductJob(Base):
     listing_images = Column(JSON, default=list)
     review_images = Column(JSON, default=list)
     selected_refs = Column(JSON, default=list)
+    editorial_shots = Column(JSON, default=list)
     flow_product_ref_ids = Column(JSON, default=list)
     ref_signature = Column(String(80), nullable=True)
 

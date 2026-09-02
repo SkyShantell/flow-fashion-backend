@@ -22,6 +22,7 @@ from backend.schemas import (
     JobOut,
     RegenerateJobRequest,
     RegenerateVideoRequest,
+    EditorialRegenerateRequest,
     RetryJobRequest,
     SelectProductRefsRequest,
     SaveAvatarRequest,
@@ -62,7 +63,51 @@ def require_api_key(x_api_key: Annotated[str | None, Header()] = None):
 
 
 def _job_error(job: ProductJob) -> str | None:
+    for shot in list(job.editorial_shots or []):
+        if isinstance(shot, dict):
+            for key in ("image_error", "video_error", "upscale_error"):
+                if shot.get(key):
+                    return str(shot.get(key))
     return job.image_error or job.video_error or job.upscale_error or job.drive_error
+
+
+def _editorial_list(job: ProductJob) -> list[dict]:
+    return [dict(x) for x in list(job.editorial_shots or []) if isinstance(x, dict)]
+
+
+def _editorial_item(job: ProductJob, shot: str) -> dict:
+    shot = str(shot or "").upper()
+    for item in _editorial_list(job):
+        if str(item.get("shot") or "").upper() == shot:
+            return item
+    raise HTTPException(400, f"Editorial frame {shot} is not initialized yet")
+
+
+def _editorial_update(job: ProductJob, shot: str, **updates) -> None:
+    shot = str(shot or "").upper()
+    items = _editorial_list(job)
+    found = False
+    out = []
+    for item in items:
+        item = dict(item)
+        if str(item.get("shot") or "").upper() == shot:
+            item.update(updates)
+            found = True
+        out.append(item)
+    if not found:
+        role = {"A": "opening", "B": "showcase", "C": "detail"}.get(shot, "shot")
+        out.append({"shot": shot, "role": role, **updates})
+    job.editorial_shots = out
+
+
+def _editorial_images_ready(job: ProductJob) -> bool:
+    items = _editorial_list(job)
+    return len(items) == 3 and all(str(x.get("image_status") or "") == "completed" for x in items)
+
+
+def _editorial_upscales_ready(job: ProductJob) -> bool:
+    items = _editorial_list(job)
+    return len(items) == 3 and all(str(x.get("upscale_status") or "") == "completed" for x in items)
 
 
 FOCUS_VALUES = {"outfit", "shirt", "hoodie", "pants", "shoes", "handbag"}
@@ -100,6 +145,7 @@ def job_out(job: ProductJob) -> JobOut:
         listing_images=list(job.listing_images or []),
         review_images=list(job.review_images or []),
         selected_refs=list(job.selected_refs or []),
+        editorial_shots=list(job.editorial_shots or []),
         stage=job.stage or "",
         approved=bool(job.approved),
         image_status=job.image_status or "pending",
@@ -434,21 +480,38 @@ def select_product_references(job_id: str, req: SelectProductRefsRequest, db: Se
     job.flow_product_ref_ids = []
     job.ref_signature = None
     job.approved = False
+    job.editorial_shots = []
     job.image_status = "pending"
     job.image_error = None
     job.image_job_id = None
     job.image_media_id = None
     job.image_url = None
     job.video_status = "pending"
+    job.video_job_id = None
+    job.video_source_media_id = None
+    job.video_source_url = None
     job.upscale_status = "pending"
+    job.upscale_job_id = None
+    job.video_media_id = None
+    job.video_url = None
+    job.video_resolution = None
+    job.drive_video_id = None
+    job.drive_video_url = None
+    job.drive_video_download_url = None
     job.stage = "ready_for_image"
     db.add(job)
     db.flush()
 
     if req.start_generation:
-        job.stage = "queued_image"
-        db.add(job)
-        enqueue_task(db, "generate_image", job_id=job.id, batch_id=job.batch_id, priority=20, max_attempts=2, allow_duplicate=True)
+        if shoe_mode:
+            job.stage = "editorial_frames_queued"
+            job.image_status = "processing"
+            db.add(job)
+            enqueue_task(db, "generate_editorial_frame", job_id=job.id, batch_id=job.batch_id, payload={"shot": "A"}, priority=20, max_attempts=2, allow_duplicate=True)
+        else:
+            job.stage = "queued_image"
+            db.add(job)
+            enqueue_task(db, "generate_image", job_id=job.id, batch_id=job.batch_id, priority=20, max_attempts=2, allow_duplicate=True)
 
     db.commit()
     db.refresh(job)
@@ -626,12 +689,200 @@ def regenerate_job(job_id: str, req: RegenerateJobRequest, db: Session = Depends
     return job_out(job)
 
 
+
+@app.post("/jobs/{job_id}/editorial/frames/{shot}/regenerate", response_model=JobOut, dependencies=[Depends(require_api_key)])
+def regenerate_editorial_frame(job_id: str, shot: str, req: EditorialRegenerateRequest, db: Session = Depends(get_db)):
+    job = db.get(ProductJob, job_id)
+    if not job:
+        raise HTTPException(404, "Job not found")
+    batch = db.get(Batch, job.batch_id)
+    if not batch or (batch.mode or "fashion_tryon") != "shoe_showcase":
+        raise HTTPException(400, "This job is not a Shoe Showcase")
+    shot = str(shot or "").upper()
+    if shot not in {"A", "B", "C"}:
+        raise HTTPException(400, "shot must be A, B or C")
+
+    active = db.query(QueueTask).filter(
+        QueueTask.job_id == job.id,
+        QueueTask.task_type.in_(["generate_editorial_frame", "submit_editorial_clip", "poll_editorial_clip", "submit_editorial_upscale", "poll_editorial_upscale", "stitch_editorial_video"]),
+        QueueTask.status.in_(["queued", "running"]),
+    ).first()
+    if active:
+        raise HTTPException(409, "This shoe is still processing. Wait for the current task to finish first.")
+
+    # Changing a start frame invalidates the final edit. If A changes, B/C are also regenerated
+    # because they use A as a consistency reference.
+    targets = ["A", "B", "C"] if shot == "A" else [shot]
+    for target in targets:
+        _editorial_update(
+            job, target,
+            image_status="pending", image_media_id="", image_url="", image_error="",
+            video_status="pending", video_job_id="", video_media_id="", video_url="", video_error="",
+            upscale_status="pending", upscale_job_id="", upscaled_media_id="", upscaled_url="", upscale_error="",
+        )
+    job.approved = False
+    job.image_status = "processing"
+    job.image_error = None
+    if shot == "A":
+        job.image_job_id = None
+        job.image_media_id = None
+        job.image_url = None
+        job.image_seed = None
+    job.video_status = "pending"
+    job.upscale_status = "pending"
+    job.video_media_id = None
+    job.video_url = None
+    job.video_resolution = None
+    job.drive_video_id = None
+    job.drive_video_url = None
+    job.drive_video_download_url = None
+    job.stage = f"editorial_frame_{shot.lower()}_queued"
+    db.add(job)
+    db.flush()
+    enqueue_task(
+        db, "generate_editorial_frame", job_id=job.id, batch_id=job.batch_id,
+        payload={"shot": shot, "instruction": str(req.instruction or "").strip()},
+        priority=20, max_attempts=2, allow_duplicate=True,
+    )
+    db.commit()
+    db.refresh(job)
+    return job_out(job)
+
+
+@app.post("/jobs/{job_id}/editorial/generate-video", response_model=JobOut, dependencies=[Depends(require_api_key)])
+def generate_editorial_video(job_id: str, db: Session = Depends(get_db)):
+    job = db.get(ProductJob, job_id)
+    if not job:
+        raise HTTPException(404, "Job not found")
+    batch = db.get(Batch, job.batch_id)
+    if not batch or (batch.mode or "fashion_tryon") != "shoe_showcase":
+        raise HTTPException(400, "This job is not a Shoe Showcase")
+    if not _editorial_images_ready(job):
+        raise HTTPException(400, "All three editorial frames must finish before generating the video")
+    active = db.query(QueueTask).filter(
+        QueueTask.job_id == job.id,
+        QueueTask.task_type.in_(["submit_video", "submit_editorial_clip", "poll_editorial_clip", "submit_editorial_upscale", "poll_editorial_upscale", "stitch_editorial_video"]),
+        QueueTask.status.in_(["queued", "running"]),
+    ).first()
+    if active:
+        raise HTTPException(409, "This editorial video is already processing")
+    job.approved = True
+    job.video_status = "pending"
+    job.upscale_status = "pending"
+    job.video_error = None
+    job.upscale_error = None
+    job.stage = "ready_for_editorial_video"
+    db.add(job)
+    db.flush()
+    enqueue_task(db, "submit_video", job_id=job.id, batch_id=job.batch_id, priority=30, max_attempts=2, allow_duplicate=True)
+    db.commit()
+    db.refresh(job)
+    return job_out(job)
+
+
+@app.post("/jobs/{job_id}/editorial/clips/{shot}/regenerate", response_model=JobOut, dependencies=[Depends(require_api_key)])
+def regenerate_editorial_clip(job_id: str, shot: str, req: EditorialRegenerateRequest, db: Session = Depends(get_db)):
+    job = db.get(ProductJob, job_id)
+    if not job:
+        raise HTTPException(404, "Job not found")
+    batch = db.get(Batch, job.batch_id)
+    if not batch or (batch.mode or "fashion_tryon") != "shoe_showcase":
+        raise HTTPException(400, "This job is not a Shoe Showcase")
+    shot = str(shot or "").upper()
+    if shot not in {"A", "B", "C"}:
+        raise HTTPException(400, "shot must be A, B or C")
+    item = _editorial_item(job, shot)
+    if str(item.get("image_status") or "") != "completed" or not item.get("image_media_id"):
+        raise HTTPException(400, f"Editorial frame {shot} is not ready")
+
+    active = db.query(QueueTask).filter(
+        QueueTask.job_id == job.id,
+        QueueTask.task_type.in_(["submit_editorial_clip", "poll_editorial_clip", "submit_editorial_upscale", "poll_editorial_upscale", "stitch_editorial_video"]),
+        QueueTask.status.in_(["queued", "running"]),
+    ).first()
+    if active:
+        raise HTTPException(409, "This editorial video is still processing")
+
+    _editorial_update(
+        job, shot,
+        video_status="pending", video_job_id="", video_media_id="", video_url="", video_error="",
+        upscale_status="pending", upscale_job_id="", upscaled_media_id="", upscaled_url="", upscale_error="",
+    )
+    job.approved = True
+    job.video_status = "processing"
+    job.upscale_status = "processing"
+    job.video_media_id = None
+    job.video_url = None
+    job.video_resolution = None
+    job.drive_video_id = None
+    job.drive_video_url = None
+    job.drive_video_download_url = None
+    job.stage = f"editorial_clip_{shot.lower()}_queued"
+    db.add(job)
+    db.flush()
+    enqueue_task(
+        db, "submit_editorial_clip", job_id=job.id, batch_id=job.batch_id,
+        payload={"shot": shot, "prompt_override": str(req.prompt or "").strip()},
+        priority=30, max_attempts=2, allow_duplicate=True,
+    )
+    db.commit()
+    db.refresh(job)
+    return job_out(job)
+
+
+@app.post("/jobs/{job_id}/editorial/rebuild", response_model=JobOut, dependencies=[Depends(require_api_key)])
+def rebuild_editorial_video(job_id: str, db: Session = Depends(get_db)):
+    job = db.get(ProductJob, job_id)
+    if not job:
+        raise HTTPException(404, "Job not found")
+    batch = db.get(Batch, job.batch_id)
+    if not batch or (batch.mode or "fashion_tryon") != "shoe_showcase":
+        raise HTTPException(400, "This job is not a Shoe Showcase")
+    if not _editorial_upscales_ready(job):
+        raise HTTPException(400, "All three editorial clips must be ready before rebuilding the cut")
+    job.video_status = "processing"
+    job.video_media_id = None
+    job.video_url = None
+    job.video_resolution = None
+    job.drive_video_id = None
+    job.drive_video_url = None
+    job.drive_video_download_url = None
+    job.stage = "editorial_ready_to_stitch"
+    db.add(job)
+    db.flush()
+    enqueue_task(db, "stitch_editorial_video", job_id=job.id, batch_id=job.batch_id, priority=70, max_attempts=3, allow_duplicate=True)
+    db.commit()
+    db.refresh(job)
+    return job_out(job)
+
 @app.post("/jobs/{job_id}/retry", response_model=JobOut, dependencies=[Depends(require_api_key)])
 def retry_job(job_id: str, req: RetryJobRequest, db: Session = Depends(get_db)):
     job = db.get(ProductJob, job_id)
     if not job:
         raise HTTPException(404, "Job not found")
     step = (req.step or "auto").lower()
+    batch = db.get(Batch, job.batch_id)
+    if batch and (batch.mode or "fashion_tryon") == "shoe_showcase" and step == "auto":
+        for item in _editorial_list(job):
+            shot = str(item.get("shot") or "").upper()
+            if str(item.get("image_status") or "") == "failed":
+                job.image_status = "processing"
+                job.image_error = None
+                job.stage = f"editorial_frame_{shot.lower()}_queued"
+                db.add(job); db.flush()
+                enqueue_task(db, "generate_editorial_frame", job_id=job.id, batch_id=job.batch_id, payload={"shot": shot}, priority=15, max_attempts=3, allow_duplicate=True)
+                db.commit(); db.refresh(job); return job_out(job)
+        for item in _editorial_list(job):
+            shot = str(item.get("shot") or "").upper()
+            if str(item.get("video_status") or "") == "failed" or str(item.get("upscale_status") or "") == "failed":
+                _editorial_update(job, shot, video_status="pending", video_error="", upscale_status="pending", upscale_error="")
+                job.video_status = "processing"; job.upscale_status = "processing"; job.stage = f"editorial_clip_{shot.lower()}_queued"
+                db.add(job); db.flush()
+                enqueue_task(db, "submit_editorial_clip", job_id=job.id, batch_id=job.batch_id, payload={"shot": shot}, priority=15, max_attempts=3, allow_duplicate=True)
+                db.commit(); db.refresh(job); return job_out(job)
+        if _editorial_upscales_ready(job) and job.video_status != "completed":
+            enqueue_task(db, "stitch_editorial_video", job_id=job.id, batch_id=job.batch_id, priority=15, max_attempts=3, allow_duplicate=True)
+            job.stage = "editorial_ready_to_stitch"; db.add(job); db.commit(); db.refresh(job); return job_out(job)
     if step == "auto":
         if job.stage in {"pending_import", "importing"} or not job.product_id:
             step = "import"

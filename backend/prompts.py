@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 
 SHOE_SHOWCASE_SCENE = "Dark luxury car interior"
-SHOE_SHOWCASE_MOTION = "Shoe Showcase — ASMR Rotation"
+SHOE_SHOWCASE_MOTION = "Shoe Showcase — Editorial Cut"
 
 SCENES = {
     SHOE_SHOWCASE_SCENE: "a dark luxury car interior with black leather seats, chrome and gloss-black trim, a dark dashboard and center console, parked at dusk with soft ambient window light",
@@ -318,40 +318,93 @@ def video_prompt(job, *, creator_profile: str = "Male", video_style: str = "Acad
 
 
 
-def shoe_showcase_image_prompt(job, *, refs_count: int, creator_profile: str = "Female") -> str:
-    """Start-frame prompt for the shoe-first dark-car showcase workflow.
+def _shoe_hand(creator_profile: str = "Female") -> str:
+    if str(creator_profile or "Female").lower().startswith("m"):
+        return "a man's hand with clean short nails, a minimal watch or bracelet, and a dark sleeve cuff"
+    return "a woman's hand with neat manicured nails, a gold chain bracelet, and a dark or knit sleeve cuff"
 
-    Product references are the ONLY supplied references in this mode. There is no avatar.
-    The composition intentionally matches the reference-video DNA: hand + shoe + dark car,
-    tight close-up, product brightest, no face/body, no rendered overlay text.
+
+def shoe_showcase_image_prompt(job, *, refs_count: int, creator_profile: str = "Female") -> str:
+    """Legacy single-frame helper retained for old shoe batches.
+
+    V15 Shoe Showcase uses three editorial frame prompts below. Keeping this function
+    prevents old queued V13 tasks from breaking during a rolling Railway deploy.
+    """
+    return shoe_editorial_frame_prompt(job, shot="A", refs_count=refs_count, creator_profile=creator_profile)
+
+
+def shoe_editorial_frame_prompt(job, *, shot: str, refs_count: int, creator_profile: str = "Female", revision: str = "") -> str:
+    """Generate one of the three reviewable shoe editorial start frames.
+
+    The actual reference TikToks use the same dark-car visual world but change composition.
+    V15 makes those changes as separate approved stills so product consistency can be checked
+    before any cut is made.
     """
     product = str(getattr(job, "product_name", None) or "the exact shoe")
-    hand = (
-        "A woman's hand with neat manicured nails, a gold chain bracelet and a dark or knit sleeve cuff"
-        if str(creator_profile or "Female").lower().startswith("f")
-        else "A man's hand with clean short nails, a minimal watch or bracelet and a dark sleeve cuff"
-    )
-    return clean_prompt(f"""
-    Create a photorealistic 9:16 vertical starter frame for a TikTok Shop shoe showcase inside a parked dark luxury car.
-    Use all {refs_count} supplied reference image(s) ONLY to preserve the exact shoe. Match {product} exactly: colorway, silhouette, upper material, pattern, stitching, sole shape and tread, heel, lining, closures, hardware and any physical branding already on the shoe. Do not redesign, recolor, resize, add, remove or merge product details.
-    Scene: black leather seats and dark interior surfaces with subtle chrome or gloss-black console/door trim. Moody low-key ambient light from the windows; the shoe is the brightest object. Editorial but casual, like a real phone shot in a parked car at dusk. No studio setup and no lifestyle props.
-    Composition: tight close-up, slightly overhead as if looking down toward the lap/seat. {hand} holds ONE shoe close to camera in a natural three-quarter front/top hero angle. Show enough of the front/top and side profile to establish shape and material while leaving room to rotate the shoe during video. Only hand, wrist and a small amount of forearm may appear. No face and no body above the forearm.
-    Stable handheld-phone realism with subtle imperfection, realistic anatomy, natural grip and believable scale. The shoe must remain fully in frame and dominate the image.
-    No generated text, captions, subtitles, overlays, signs, extra logos, watermarks, extra products, extra hands, extra people or animals. Physical branding already printed or molded on the referenced shoe may remain.
-    """)
+    hand = _shoe_hand(creator_profile)
+    shot = str(shot or "A").upper()
+    revision_line = f" User revision for this frame: {revision}." if str(revision or "").strip() else ""
+
+    consistency = ""
+    if shot in {"B", "C"}:
+        consistency = " One supplied reference is the already-approved opening frame A. Use it only as a consistency anchor for the exact shoe identity, scale, color and dark-car visual world; do not copy frame A's composition. The original listing/review references remain the authority for product details."
+
+    common = f"""
+    Photorealistic 9:16 vertical TikTok Shop shoe showcase still inside the SAME parked dark luxury car visual world: black leather seats, dark dashboard/console, subtle chrome or gloss-black trim, moody low-key window light. Product is the brightest element. Real phone-camera UGC, premium but believable, not a studio render.
+    PRODUCT LOCK: Use the supplied product reference images to preserve {product} exactly. Keep the exact colorway, silhouette, toe shape, upper material and texture, stitching, sole shape/tread, heel, lining, closures, zipper, laces/straps, hardware, proportions and any physical branding visible in the references. Do not redesign, recolor, duplicate, merge, invent or remove shoe features.{consistency}
+    Human visibility is limited to hand/forearm and/or lower leg/foot only. Never show a face or upper body. No extra people, extra hands, duplicate shoes beyond what the composition naturally requires, animals, props, generated text, captions, subtitles, overlays, added logos or watermarks. Physical branding already on the real shoe may remain.
+    """
+
+    if shot == "B":
+        composition = f"""
+        EDITORIAL FRAME B — ON-FOOT SHOWCASE. This must be a visibly different composition from the opener while keeping the identical shoe and same car environment. Show the shoe being worn on one foot, with only the lower leg/ankle/foot visible. Angle the foot toward camera so the toe, upper and outer side profile are clear; the shoe fills most of frame. A hand may lightly enter near the shoe, but do not cover important product details. The pose should feel like a real person lifting or angling their foot inside a parked car for a TikTok product flex. Tight product-first framing, natural perspective and believable scale.
+        """
+    elif shot == "C":
+        composition = f"""
+        EDITORIAL FRAME C — DETAIL / HERO. {hand} holds the exact shoe close to camera at a tighter three-quarter angle. Show a useful secondary feature that is actually present in the supplied references: sole edge/tread, heel/back construction, lining/footbed, zipper, lace/strap hardware, stitching or material texture. Do not invent a detail that is not visible in the references. Finish composition should already feel like a strong final hero frame, with upper and sole edge catching the ambient car light.
+        """
+    else:
+        composition = f"""
+        EDITORIAL FRAME A — OPENING HERO. {hand} presents ONE exact shoe close to camera in a strong three-quarter front/top hero angle. Tight slightly-overhead phone framing, as if looking toward the lap/seat. Show enough front/top and side profile to establish the shoe instantly. The hand naturally cradles the shoe and leaves room for immediate lift/tilt movement in the video. This is the opening freeze frame and should be the strongest clean scroll-stopping composition.
+        """
+
+    return clean_prompt(common + composition + revision_line)
+
+
+def shoe_editorial_clip_prompt(job, *, shot: str, creator_profile: str = "Female", prompt_override: str = "") -> str:
+    """Four-second I2V prompt for one editorial segment.
+
+    Every segment starts from its own approved still. FFmpeg performs the hard cuts later;
+    Omni never has to redraw the shoe across an internal scene cut.
+    """
+    if str(prompt_override or "").strip():
+        return clean_prompt(prompt_override)
+    product = str(getattr(job, "product_name", None) or "the exact shoe")
+    hand = _shoe_hand(creator_profile)
+    shot = str(shot or "A").upper()
+
+    base = f"""
+    9:16 vertical, 4 seconds. Use the supplied approved start image as the EXACT FIRST FRAME. Begin by perfectly matching that freeze frame, then move immediately. Same dark luxury car, same lighting, same visible hand/lower-leg styling and exact same {product}. Silent: no speech, voiceover, music or sound effects.
+    PRODUCT LOCK FOR EVERY FRAME: preserve the exact shoe from the approved start image — exact color, material, silhouette, toe, sole/tread, heel, stitching, zipper/closures, laces/straps, hardware, proportions and physical branding. Never morph, recolor, redesign, duplicate or invent product features.
+    """
+    if shot == "B":
+        motion = """
+        SHOT B — ACTIVE ON-FOOT SHOWCASE. From the exact opening freeze frame, make a clear controlled foot movement: lift/angle the foot, rotate enough to show front-to-side profile, then bring it slightly closer or change the leg angle so the product has obvious motion. The camera may make a subtle handheld reframe/push while staying product-first. Movement should feel stylish and TikTok-native, not static, but physically realistic. Finish with the side profile readable.
+        """
+    elif shot == "C":
+        motion = f"""
+        SHOT C — DETAIL / HERO FINISH. From the exact freeze frame, {hand} makes a deliberate close product movement: tilt/rotate the shoe to reveal the physically present detail already visible in the start frame (for example sole edge/tread, heel, zipper, lining, stitching or texture), bring it a little closer to camera, then settle into a strong three-quarter hero angle. Use noticeable but controlled motion and a small camera reframe so the ending feels satisfying.
+        """
+    else:
+        motion = f"""
+        SHOT A — OPENING MOVEMENT. From the exact freeze frame, {hand} immediately lifts and tilts the shoe toward camera, shifts it laterally, and rotates it enough to reveal more of the front/top and side profile. Allow a small natural phone-camera push/reframe. Movement must be clearly visible and more energetic than a slow static rotation, while remaining premium and controlled. End on a readable product angle ready for the edit to cut away.
+        """
+    rules = """
+    No face or upper body. No extra hands/people. No generated text, captions, subtitles, overlays, signs, watermarks or added logos. No product transformation, anatomy glitches or impossible motion. Physical branding already on the shoe may remain. Keep the shoe fully recognizable and consistent from first frame to last.
+    """
+    return clean_prompt(base + motion + rules)
 
 
 def shoe_showcase_video_prompt(job, *, creator_profile: str = "Female") -> str:
-    """Omni 1.1 prompt reconstructed from the supplied shoe showcase skill/reference videos."""
-    product = str(getattr(job, "product_name", None) or "the exact shoe")
-    hand = (
-        "A woman's hand with neat manicured nails and a gold chain bracelet, wrist emerging from a dark or knit sleeve"
-        if str(creator_profile or "Female").lower().startswith("f")
-        else "A man's hand with clean short nails and a minimal watch or bracelet, wrist emerging from a dark sleeve"
-    )
-    return clean_prompt(f"""
-    9:16 vertical, 10 seconds, one continuous unbroken shot, no cuts. Use the supplied approved start image as the exact first frame. Dark luxury car interior with black leather seats and subtle chrome or gloss-black console/door trim. Moody low-key ambient lighting; {product} stays the brightest element. Tight close-up, slightly overhead phone angle. Stable handheld feel with only subtle micro-movement. Silent: no audio, voiceover or sound effects.
-    [00:00-00:05] {hand} presents the exact shoe toward camera and begins a slow deliberate rotation from the front/top view toward the side profile. Preserve the exact color, pattern, materials, shape, stitching, sole, closures, hardware and physical branding from the approved start frame. Fingers cradle the shoe naturally. Hold readable angles briefly; the hand provides the motion while the camera remains roughly fixed.
-    [00:05-00:10] Continue the same uninterrupted rotation to reveal the most useful hidden shoe detail: interior/lining, heel/back construction, sole edge or tread, strap/lace hardware, depending on what is physically present. Do not invent features. Finish at a clean three-quarter front hero angle with a slight tilt so the upper and sole edge catch the ambient light. Movement remains slow, satisfying and ASMR-paced.
-    No face. No person above the forearm. No extra hands or people. No scene change, camera jump, zoom jump, morphing or product transformation. No generated text, captions, subtitles, overlays, signs, watermarks or added logos anywhere in frame. Physical branding already on the shoe may remain. Preserve the exact shoe throughout.
-    """)
+    """Legacy helper: V15 defaults to Editorial Cut; old UI prompt views get Shot A."""
+    return shoe_editorial_clip_prompt(job, shot="A", creator_profile=creator_profile)
