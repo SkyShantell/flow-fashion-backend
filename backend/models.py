@@ -45,6 +45,7 @@ class Batch(Base):
     avatar_b64 = Column(Text, nullable=True)
     avatar_mime = Column(String(80), default="image/jpeg")
     avatar_media_id = Column(String(500), nullable=True)
+    avatar_name = Column(String(160), nullable=True)
 
     status = Column(String(80), default="open")
     created_at = Column(DateTime(timezone=True), default=utcnow)

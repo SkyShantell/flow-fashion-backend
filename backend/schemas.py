@@ -27,6 +27,7 @@ class CreateBatchRequest(BaseModel):
     auto_approve: bool = False
     avatar_b64: str | None = None
     avatar_mime: str = "image/jpeg"
+    avatar_name: str | None = None
 
 
 class ImportProductsRequest(BaseModel):
@@ -105,6 +106,7 @@ class JobOut(BaseModel):
 class BatchOut(BaseModel):
     id: str
     name: str | None
+    avatar_name: str | None = None
     mode: str = "fashion_tryon"
     scene: str | None
     scene_pool: list[str] = Field(default_factory=list)

@@ -177,6 +177,7 @@ def batch_out(batch: Batch, db: Session) -> BatchOut:
     return BatchOut(
         id=batch.id,
         name=batch.name,
+        avatar_name=batch.avatar_name,
         mode=batch.mode or "fashion_tryon",
         scene=batch.scene,
         scene_pool=_scene_pool(batch),
@@ -266,6 +267,7 @@ def create_batch(req: CreateBatchRequest, db: Session = Depends(get_db)):
         auto_approve=req.auto_approve,
         avatar_b64=avatar_b64,
         avatar_mime=req.avatar_mime or "image/jpeg",
+        avatar_name=(str(req.avatar_name or "").strip()[:160] or None),
     )
     db.add(batch)
     db.commit()
@@ -281,6 +283,7 @@ def create_batch_form(
     creator_profile: str = Form("Male"),
     video_style: str = Form("Academy — Boss / Calm"),
     auto_approve: bool = Form(False),
+    avatar_name: str = Form(""),
     avatar: UploadFile | None = File(None),
     db: Session = Depends(get_db),
 ):
@@ -312,6 +315,7 @@ def create_batch_form(
         auto_approve=auto_approve,
         avatar_b64=avatar_b64,
         avatar_mime=avatar_mime,
+        avatar_name=(str(avatar_name or "").strip()[:160] or None),
     )
     db.add(batch)
     db.commit()
@@ -333,11 +337,17 @@ def get_batch(batch_id: str, db: Session = Depends(get_db)):
     return batch_out(batch, db)
 
 
+def _require_batch_open(batch: Batch) -> None:
+    if str(batch.status or "open").strip().lower() == "done":
+        raise HTTPException(409, "This batch is marked done. Start a new batch before importing more products.")
+
+
 @app.post("/batches/{batch_id}/products", response_model=BatchOut, dependencies=[Depends(require_api_key)])
 def import_products(batch_id: str, req: ImportProductsRequest, db: Session = Depends(get_db)):
     batch = db.get(Batch, batch_id)
     if not batch:
         raise HTTPException(404, "Batch not found")
+    _require_batch_open(batch)
     links = []
     for link in req.links:
         link = str(link or "").strip()
@@ -378,6 +388,7 @@ def import_from_scanner(batch_id: str, req: ImportScannerRequest, db: Session = 
     batch = db.get(Batch, batch_id)
     if not batch:
         raise HTTPException(404, "Batch not found")
+    _require_batch_open(batch)
     pending, error = sheets.scanner_pending()
     if error:
         raise HTTPException(500, error)
@@ -427,6 +438,19 @@ def import_from_scanner(batch_id: str, req: ImportScannerRequest, db: Session = 
         out = batch_out(batch, db).dict()
         out["scanner_mark_warning"] = mark_error
         return out
+    return batch_out(batch, db)
+
+
+@app.post("/batches/{batch_id}/done", response_model=BatchOut, dependencies=[Depends(require_api_key)])
+def mark_batch_done(batch_id: str, db: Session = Depends(get_db)):
+    batch = db.get(Batch, batch_id)
+    if not batch:
+        raise HTTPException(404, "Batch not found")
+    batch.status = "done"
+    batch.updated_at = datetime.now(timezone.utc)
+    db.add(batch)
+    db.commit()
+    db.refresh(batch)
     return batch_out(batch, db)
 
 

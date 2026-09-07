@@ -40,6 +40,7 @@ def _add_missing_columns() -> None:
             "ALTER TABLE batches ADD COLUMN IF NOT EXISTS mode VARCHAR(80) DEFAULT 'fashion_tryon'",
             "ALTER TABLE batches ADD COLUMN IF NOT EXISTS scene_pool JSON",
             "ALTER TABLE batches ADD COLUMN IF NOT EXISTS motion_pool JSON",
+            "ALTER TABLE batches ADD COLUMN IF NOT EXISTS avatar_name VARCHAR(160)",
             "ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS scene_override VARCHAR(120)",
             "ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS motion_style_override VARCHAR(80)",
             "ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS editorial_shots JSON",
@@ -55,6 +56,7 @@ def _add_missing_columns() -> None:
             "mode": "VARCHAR(80) DEFAULT 'fashion_tryon'",
             "scene_pool": "JSON",
             "motion_pool": "JSON",
+            "avatar_name": "VARCHAR(160)",
         },
         "product_jobs": {
             "scene_override": "VARCHAR(120)",
