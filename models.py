@@ -1,0 +1,178 @@
+from __future__ import annotations
+
+import uuid
+from datetime import datetime, timezone
+
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, JSON, String, Text
+from sqlalchemy.orm import relationship
+
+from backend.db import Base
+
+
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def new_id(prefix: str) -> str:
+    return f"{prefix}_{uuid.uuid4().hex[:18]}"
+
+
+class SavedAvatar(Base):
+    __tablename__ = "saved_avatars"
+
+    id = Column(String(64), primary_key=True, default=lambda: new_id("avatar"))
+    name = Column(String(160), nullable=False)
+    image_b64 = Column(Text, nullable=False)
+    image_mime = Column(String(80), default="image/jpeg")
+    created_at = Column(DateTime(timezone=True), default=utcnow)
+    updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class Batch(Base):
+    __tablename__ = "batches"
+
+    id = Column(String(64), primary_key=True, default=lambda: new_id("batch"))
+    name = Column(String(200), default="Flow batch")
+    source = Column(String(80), default="manual")
+    mode = Column(String(80), default="fashion_tryon")
+    scene = Column(String(120), default="Modern apartment mirror")
+    scene_pool = Column(JSON, default=list)
+    creator_profile = Column(String(40), default="Male")
+    video_style = Column(String(80), default="Academy — Boss / Calm")
+    motion_pool = Column(JSON, default=list)
+    auto_approve = Column(Boolean, default=False)
+
+    avatar_b64 = Column(Text, nullable=True)
+    avatar_mime = Column(String(80), default="image/jpeg")
+    avatar_media_id = Column(String(500), nullable=True)
+    avatar_name = Column(String(160), nullable=True)
+
+    status = Column(String(80), default="open")
+    created_at = Column(DateTime(timezone=True), default=utcnow)
+    updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+    jobs = relationship("ProductJob", back_populates="batch", cascade="all, delete-orphan")
+
+
+class ProductJob(Base):
+    __tablename__ = "product_jobs"
+
+    id = Column(String(64), primary_key=True, default=lambda: new_id("job"))
+    batch_id = Column(String(64), ForeignKey("batches.id"), nullable=False, index=True)
+
+    product_url = Column(Text, nullable=False)
+    product_id = Column(String(160), nullable=True, index=True)
+    product_name = Column(Text, default="Unknown Product")
+    focus = Column(String(40), default="outfit")
+    back_design = Column(Boolean, default=False)
+    scene_override = Column(String(120), nullable=True)
+    motion_style_override = Column(String(80), nullable=True)
+
+    listing_images = Column(JSON, default=list)
+    review_images = Column(JSON, default=list)
+    selected_refs = Column(JSON, default=list)
+    editorial_shots = Column(JSON, default=list)
+    flow_product_ref_ids = Column(JSON, default=list)
+    ref_signature = Column(String(80), nullable=True)
+
+    stage = Column(String(80), default="pending_import", index=True)
+    approved = Column(Boolean, default=False)
+
+    image_status = Column(String(80), default="pending")
+    image_job_id = Column(String(500), nullable=True)
+    image_media_id = Column(String(500), nullable=True)
+    image_url = Column(Text, nullable=True)
+    image_seed = Column(String(120), nullable=True)
+    image_error = Column(Text, nullable=True)
+
+    video_status = Column(String(80), default="pending")
+    video_job_id = Column(String(500), nullable=True)
+    video_source_media_id = Column(String(500), nullable=True)
+    video_source_url = Column(Text, nullable=True)
+    video_source_resolution = Column(String(40), nullable=True)
+    thumbnail_url = Column(Text, nullable=True)
+    video_error = Column(Text, nullable=True)
+
+    upscale_status = Column(String(80), default="pending")
+    upscale_job_id = Column(String(500), nullable=True)
+    video_media_id = Column(String(500), nullable=True)
+    video_url = Column(Text, nullable=True)
+    video_resolution = Column(String(40), nullable=True)
+    upscale_error = Column(Text, nullable=True)
+
+    drive_image_id = Column(String(160), nullable=True)
+    drive_image_url = Column(Text, nullable=True)
+    drive_image_download_url = Column(Text, nullable=True)
+    drive_video_id = Column(String(160), nullable=True)
+    drive_video_url = Column(Text, nullable=True)
+    drive_video_download_url = Column(Text, nullable=True)
+    drive_product_folder_url = Column(Text, nullable=True)
+    drive_batch_folder_url = Column(Text, nullable=True)
+    drive_error = Column(Text, nullable=True)
+
+    sheet_row = Column(Integer, nullable=True)
+
+    image_attempts = Column(Integer, default=0)
+    video_attempts = Column(Integer, default=0)
+    upscale_attempts = Column(Integer, default=0)
+    archive_attempts = Column(Integer, default=0)
+    failure_count = Column(Integer, default=0)
+
+    regen_instruction = Column(Text, nullable=True)
+    last_regen_instruction = Column(Text, nullable=True)
+
+    scanner_row_num = Column(Integer, nullable=True)
+    scanner_creator_count = Column(Integer, nullable=True)
+    scanner_video_count = Column(Integer, nullable=True)
+    scanner_combined_views = Column(Integer, nullable=True)
+    scanner_creators = Column(Text, nullable=True)
+    sniper_meta = Column(JSON, default=dict)
+
+    created_at = Column(DateTime(timezone=True), default=utcnow)
+    updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+    batch = relationship("Batch", back_populates="jobs")
+    tasks = relationship("QueueTask", back_populates="job", cascade="all, delete-orphan")
+
+
+class SniperInboxBatch(Base):
+    __tablename__ = "sniper_inbox_batches"
+
+    id = Column(String(64), primary_key=True, default=lambda: new_id("sniper"))
+    source_batch_id = Column(String(160), nullable=False, unique=True, index=True)
+    preset = Column(String(200), default="Custom")
+    source_file = Column(String(260), nullable=True)
+    products = Column(JSON, default=list)
+
+    status = Column(String(40), default="pending", index=True)
+    imported_batch_id = Column(String(64), nullable=True, index=True)
+    avatar_id = Column(String(64), nullable=True)
+    avatar_name = Column(String(160), nullable=True)
+
+    created_at = Column(DateTime(timezone=True), default=utcnow)
+    imported_at = Column(DateTime(timezone=True), nullable=True)
+    updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class QueueTask(Base):
+    __tablename__ = "queue_tasks"
+
+    id = Column(String(64), primary_key=True, default=lambda: new_id("task"))
+    task_type = Column(String(80), nullable=False, index=True)
+    status = Column(String(40), default="queued", index=True)
+    priority = Column(Integer, default=100, index=True)
+
+    batch_id = Column(String(64), ForeignKey("batches.id"), nullable=True, index=True)
+    job_id = Column(String(64), ForeignKey("product_jobs.id"), nullable=True, index=True)
+    payload = Column(JSON, default=dict)
+
+    attempts = Column(Integer, default=0)
+    max_attempts = Column(Integer, default=3)
+    error = Column(Text, nullable=True)
+
+    run_after = Column(DateTime(timezone=True), default=utcnow, index=True)
+    locked_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=utcnow)
+    updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+    job = relationship("ProductJob", back_populates="tasks")
