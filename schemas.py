@@ -18,7 +18,6 @@ class AvatarOut(BaseModel):
 
 class CreateBatchRequest(BaseModel):
     name: str = "Flow batch"
-    avatar_name: str | None = None
     mode: str = "fashion_tryon"
     scene: str = "Modern apartment mirror"
     scene_pool: list[str] = Field(default_factory=list)
@@ -28,6 +27,8 @@ class CreateBatchRequest(BaseModel):
     auto_approve: bool = False
     avatar_b64: str | None = None
     avatar_mime: str = "image/jpeg"
+    avatar_name: str | None = None
+    flow_account_email: str | None = None
 
 
 class ImportProductsRequest(BaseModel):
@@ -47,6 +48,10 @@ class SelectProductRefsRequest(BaseModel):
     focus: str | None = None
     scene: str | None = None
     motion_style: str | None = None
+
+
+class UpdateFlowAccountRequest(BaseModel):
+    flow_account_email: str | None = None
 
 
 class UpdateJobSettingsRequest(BaseModel):
@@ -77,26 +82,6 @@ class EditorialRegenerateRequest(BaseModel):
     prompt: str = ""
 
 
-class SniperProductIn(BaseModel):
-    name: str = "Unknown Product"
-    source_url: str
-    sniper_meta: dict = Field(default_factory=dict)
-
-
-class SniperInboxPushRequest(BaseModel):
-    source_batch_id: str
-    preset: str = "Custom"
-    source_file: str | None = None
-    products: list[SniperProductIn] = Field(default_factory=list)
-
-
-class SniperInboxImportRequest(BaseModel):
-    avatar_id: str
-    batch_name: str | None = None
-    creator_profile: str = "Male"
-    auto_approve: bool = False
-
-
 class JobOut(BaseModel):
     id: str
     batch_id: str
@@ -120,7 +105,6 @@ class JobOut(BaseModel):
     video_resolution: str | None
     drive_video_url: str | None
     drive_video_download_url: str | None = None
-    sniper_meta: dict = Field(default_factory=dict)
     error: str | None = None
 
 
@@ -128,6 +112,7 @@ class BatchOut(BaseModel):
     id: str
     name: str | None
     avatar_name: str | None = None
+    flow_account_email: str | None = None
     mode: str = "fashion_tryon"
     scene: str | None
     scene_pool: list[str] = Field(default_factory=list)

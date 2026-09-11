@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from backend.config import google_service_account_info, settings
 from backend.db import SessionLocal, init_db
-from backend.models import Batch, ProductJob, QueueTask, SavedAvatar, SniperInboxBatch
+from backend.models import Batch, ProductJob, QueueTask, SavedAvatar
 from backend.schemas import (
     ApproveJobRequest,
     AvatarOut,
@@ -27,10 +27,9 @@ from backend.schemas import (
     SelectProductRefsRequest,
     SaveAvatarRequest,
     UpdateJobSettingsRequest,
-    SniperInboxPushRequest,
-    SniperInboxImportRequest,
+    UpdateFlowAccountRequest,
 )
-from backend.services import sheets
+from backend.services import sheets, useapi
 from backend.prompts import MOTION_STYLES, SCENES, SHOE_SHOWCASE_MOTION, SHOE_SHOWCASE_SCENE, default_motion_style, video_prompt, shoe_showcase_video_prompt
 from backend.tasks import enqueue_task, run_one_claimed_task
 
@@ -158,7 +157,6 @@ def job_out(job: ProductJob) -> JobOut:
         video_resolution=job.video_resolution,
         drive_video_url=job.drive_video_url,
         drive_video_download_url=job.drive_video_download_url,
-        sniper_meta=dict(job.sniper_meta or {}),
         error=_job_error(job),
     )
 
@@ -181,6 +179,7 @@ def batch_out(batch: Batch, db: Session) -> BatchOut:
         id=batch.id,
         name=batch.name,
         avatar_name=batch.avatar_name,
+        flow_account_email=batch.flow_account_email,
         mode=batch.mode or "fashion_tryon",
         scene=batch.scene,
         scene_pool=_scene_pool(batch),
@@ -208,6 +207,17 @@ def health():
         "video_native_resolution": cfg.video_native_resolution,
         "video_final_resolution": cfg.video_final_resolution,
     }
+
+
+@app.get("/api/flow/accounts", dependencies=[Depends(require_api_key)])
+def flow_accounts_status():
+    """Sanitized UseAPI account status. USEAPI_TOKEN never leaves the backend."""
+    try:
+        return useapi.list_flow_accounts()
+    except Exception as exc:
+        raise HTTPException(502, f"Could not load Flow accounts: {exc}")
+
+
 
 
 @app.get("/avatars", response_model=list[AvatarOut], dependencies=[Depends(require_api_key)])
@@ -271,6 +281,7 @@ def create_batch(req: CreateBatchRequest, db: Session = Depends(get_db)):
         avatar_b64=avatar_b64,
         avatar_mime=req.avatar_mime or "image/jpeg",
         avatar_name=(str(req.avatar_name or "").strip()[:160] or None),
+        flow_account_email=(useapi.normalize_account_email(req.flow_account_email) or None),
     )
     db.add(batch)
     db.commit()
@@ -287,6 +298,7 @@ def create_batch_form(
     video_style: str = Form("Academy — Boss / Calm"),
     auto_approve: bool = Form(False),
     avatar_name: str = Form(""),
+    flow_account_email: str = Form(""),
     avatar: UploadFile | None = File(None),
     db: Session = Depends(get_db),
 ):
@@ -319,6 +331,7 @@ def create_batch_form(
         avatar_b64=avatar_b64,
         avatar_mime=avatar_mime,
         avatar_name=(str(avatar_name or "").strip()[:160] or None),
+        flow_account_email=(useapi.normalize_account_email(flow_account_email) or None),
     )
     db.add(batch)
     db.commit()
@@ -338,6 +351,31 @@ def get_batch(batch_id: str, db: Session = Depends(get_db)):
     if not batch:
         raise HTTPException(404, "Batch not found")
     return batch_out(batch, db)
+
+
+@app.put("/batches/{batch_id}/flow-account", response_model=BatchOut, dependencies=[Depends(require_api_key)])
+def update_batch_flow_account(batch_id: str, req: UpdateFlowAccountRequest, db: Session = Depends(get_db)):
+    batch = db.get(Batch, batch_id)
+    if not batch:
+        raise HTTPException(404, "Batch not found")
+    email = useapi.normalize_account_email(req.flow_account_email)
+    if email:
+        # Validate before persisting so a typo cannot poison queued generations.
+        try:
+            detail = useapi.get_flow_account(email)
+        except Exception as exc:
+            raise HTTPException(400, f"Flow account could not be selected: {exc}")
+        resolved = str(detail.get("email") or email).strip()
+        batch.flow_account_email = resolved or email
+    else:
+        batch.flow_account_email = None
+    batch.updated_at = datetime.now(timezone.utc)
+    db.add(batch)
+    db.commit()
+    db.refresh(batch)
+    return batch_out(batch, db)
+
+
 
 
 def _require_batch_open(batch: Batch) -> None:
@@ -444,170 +482,6 @@ def import_from_scanner(batch_id: str, req: ImportScannerRequest, db: Session = 
     return batch_out(batch, db)
 
 
-def _sniper_inbox_out(row: SniperInboxBatch) -> dict:
-    products = [dict(x) for x in list(row.products or []) if isinstance(x, dict)]
-    return {
-        "id": row.id,
-        "source_batch_id": row.source_batch_id,
-        "preset": row.preset or "Custom",
-        "source_file": row.source_file or "",
-        "status": row.status or "pending",
-        "product_count": len(products),
-        "products": products,
-        "imported_batch_id": row.imported_batch_id,
-        "avatar_id": row.avatar_id,
-        "avatar_name": row.avatar_name,
-        "created_at": row.created_at.isoformat() if row.created_at else None,
-        "imported_at": row.imported_at.isoformat() if row.imported_at else None,
-    }
-
-
-@app.post("/sniper/inbox", dependencies=[Depends(require_api_key)])
-def receive_sniper_batch(req: SniperInboxPushRequest, db: Session = Depends(get_db)):
-    source_batch_id = str(req.source_batch_id or "").strip()[:160]
-    if not source_batch_id:
-        raise HTTPException(400, "source_batch_id is required")
-
-    clean_products = []
-    seen = set()
-    for product in req.products:
-        url = str(product.source_url or "").strip()
-        if not url or url in seen:
-            continue
-        seen.add(url)
-        clean_products.append({
-            "name": str(product.name or "Unknown Product").strip()[:500] or "Unknown Product",
-            "source_url": url,
-            "sniper_meta": dict(product.sniper_meta or {}),
-        })
-    if not clean_products:
-        raise HTTPException(400, "No products were supplied")
-
-    existing = db.query(SniperInboxBatch).filter(SniperInboxBatch.source_batch_id == source_batch_id).first()
-    if existing:
-        # Retrying the same Momentum Sniper push is idempotent. If it is still pending,
-        # refresh the product payload in case the first request was incomplete.
-        if str(existing.status or "pending") == "pending":
-            existing.products = clean_products
-            existing.preset = str(req.preset or "Custom").strip()[:200] or "Custom"
-            existing.source_file = str(req.source_file or "").strip()[:260] or None
-            existing.updated_at = datetime.now(timezone.utc)
-            db.add(existing)
-            db.commit()
-            db.refresh(existing)
-        return _sniper_inbox_out(existing)
-
-    row = SniperInboxBatch(
-        source_batch_id=source_batch_id,
-        preset=str(req.preset or "Custom").strip()[:200] or "Custom",
-        source_file=str(req.source_file or "").strip()[:260] or None,
-        products=clean_products,
-        status="pending",
-    )
-    db.add(row)
-    db.commit()
-    db.refresh(row)
-    return _sniper_inbox_out(row)
-
-
-@app.get("/sniper/inbox", dependencies=[Depends(require_api_key)])
-def list_sniper_inbox(status: str = "pending", db: Session = Depends(get_db)):
-    query = db.query(SniperInboxBatch)
-    wanted = str(status or "").strip().lower()
-    if wanted and wanted != "all":
-        query = query.filter(SniperInboxBatch.status == wanted)
-    rows = query.order_by(SniperInboxBatch.created_at.desc()).limit(100).all()
-    return [_sniper_inbox_out(row) for row in rows]
-
-
-@app.post("/sniper/inbox/{inbox_id}/import", response_model=BatchOut, dependencies=[Depends(require_api_key)])
-def import_sniper_inbox_batch(inbox_id: str, req: SniperInboxImportRequest, db: Session = Depends(get_db)):
-    inbox = db.get(SniperInboxBatch, inbox_id)
-    if not inbox:
-        raise HTTPException(404, "Momentum Sniper inbox batch not found")
-    if str(inbox.status or "pending") == "imported" and inbox.imported_batch_id:
-        existing_batch = db.get(Batch, inbox.imported_batch_id)
-        if existing_batch:
-            return batch_out(existing_batch, db)
-    if str(inbox.status or "pending") != "pending":
-        raise HTTPException(409, f"This Momentum Sniper inbox batch is already {inbox.status}")
-
-    avatar = db.get(SavedAvatar, str(req.avatar_id or "").strip())
-    if not avatar:
-        raise HTTPException(400, "Choose a saved avatar before importing this Momentum Sniper batch")
-
-    profile = "Female" if str(req.creator_profile or "").lower().startswith("f") else "Male"
-    default_motion = default_motion_style(profile)
-    products = [dict(x) for x in list(inbox.products or []) if isinstance(x, dict)]
-    if not products:
-        raise HTTPException(400, "This Momentum Sniper inbox batch has no products")
-
-    created_label = inbox.created_at.astimezone(timezone.utc).strftime("%b %d") if inbox.created_at else "Sniper"
-    batch_name = str(req.batch_name or "").strip()[:200]
-    if not batch_name:
-        batch_name = f"{avatar.name} · {inbox.preset or 'Sniper'} · {created_label}"
-
-    batch = Batch(
-        name=batch_name,
-        source="momentum_sniper",
-        mode="fashion_tryon",
-        scene="Modern apartment mirror",
-        scene_pool=["Modern apartment mirror"],
-        creator_profile=profile,
-        video_style=default_motion,
-        motion_pool=[default_motion],
-        auto_approve=bool(req.auto_approve),
-        avatar_b64=avatar.image_b64,
-        avatar_mime=avatar.image_mime or "image/jpeg",
-        avatar_name=avatar.name,
-        status="open",
-    )
-    db.add(batch)
-    db.flush()
-
-    next_index = 0
-    seen_urls = set()
-    for product in products:
-        link = str(product.get("source_url") or "").strip()
-        if not link or link in seen_urls:
-            continue
-        seen_urls.add(link)
-        assigned_scene, assigned_motion = _assign_defaults(batch, next_index)
-        next_index += 1
-        job = ProductJob(
-            batch_id=batch.id,
-            product_url=link,
-            product_name=str(product.get("name") or "Unknown Product"),
-            stage="pending_import",
-            scene_override=assigned_scene,
-            motion_style_override=assigned_motion,
-            sniper_meta=dict(product.get("sniper_meta") or {}),
-        )
-        db.add(job)
-        db.flush()
-        enqueue_task(
-            db,
-            "import_product",
-            job_id=job.id,
-            batch_id=batch.id,
-            payload={"start_generation": False},
-            priority=10,
-            max_attempts=3,
-        )
-
-    inbox.status = "imported"
-    inbox.imported_batch_id = batch.id
-    inbox.avatar_id = avatar.id
-    inbox.avatar_name = avatar.name
-    inbox.imported_at = datetime.now(timezone.utc)
-    inbox.updated_at = datetime.now(timezone.utc)
-    db.add(inbox)
-    db.add(batch)
-    db.commit()
-    db.refresh(batch)
-    return batch_out(batch, db)
-
-
 @app.post("/batches/{batch_id}/done", response_model=BatchOut, dependencies=[Depends(require_api_key)])
 def mark_batch_done(batch_id: str, db: Session = Depends(get_db)):
     batch = db.get(Batch, batch_id)
@@ -669,6 +543,7 @@ def select_product_references(job_id: str, req: SelectProductRefsRequest, db: Se
     job.selected_refs = refs
     # Force Flow reference uploads to be rebuilt when the user changes photos.
     job.flow_product_ref_ids = []
+    job.flow_product_refs = []
     job.ref_signature = None
     job.approved = False
     job.editorial_shots = []
@@ -677,10 +552,12 @@ def select_product_references(job_id: str, req: SelectProductRefsRequest, db: Se
     job.image_job_id = None
     job.image_media_id = None
     job.image_url = None
+    job.image_source_email = None
     job.video_status = "pending"
     job.video_job_id = None
     job.video_source_media_id = None
     job.video_source_url = None
+    job.video_source_email = None
     job.upscale_status = "pending"
     job.upscale_job_id = None
     job.video_media_id = None
@@ -814,6 +691,7 @@ def regenerate_video(job_id: str, req: RegenerateVideoRequest, db: Session = Dep
     job.video_source_media_id = None
     job.video_source_url = None
     job.video_source_resolution = None
+    job.video_source_email = None
     job.thumbnail_url = None
     job.video_error = None
     job.upscale_status = "pending"
@@ -907,8 +785,8 @@ def regenerate_editorial_frame(job_id: str, shot: str, req: EditorialRegenerateR
     for target in targets:
         _editorial_update(
             job, target,
-            image_status="pending", image_media_id="", image_url="", image_error="",
-            video_status="pending", video_job_id="", video_media_id="", video_url="", video_error="",
+            image_status="pending", image_media_id="", image_url="", image_source_email="", image_error="",
+            video_status="pending", video_job_id="", video_media_id="", video_url="", video_source_email="", video_error="",
             upscale_status="pending", upscale_job_id="", upscaled_media_id="", upscaled_url="", upscale_error="",
         )
     job.approved = False
@@ -919,6 +797,7 @@ def regenerate_editorial_frame(job_id: str, shot: str, req: EditorialRegenerateR
         job.image_media_id = None
         job.image_url = None
         job.image_seed = None
+        job.image_source_email = None
     job.video_status = "pending"
     job.upscale_status = "pending"
     job.video_media_id = None
