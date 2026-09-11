@@ -38,8 +38,8 @@ def _default_editorial_shots() -> list[dict]:
     return [
         {
             "shot": shot, "role": roles[shot],
-            "image_status": "pending", "image_media_id": "", "image_url": "", "image_error": "",
-            "video_status": "pending", "video_job_id": "", "video_media_id": "", "video_url": "", "video_error": "",
+            "image_status": "pending", "image_media_id": "", "image_url": "", "image_source_email": "", "image_error": "",
+            "video_status": "pending", "video_job_id": "", "video_media_id": "", "video_url": "", "video_source_email": "", "video_error": "",
             "upscale_status": "pending", "upscale_job_id": "", "upscaled_media_id": "", "upscaled_url": "", "upscale_error": "",
         }
         for shot in EDITORIAL_SHOT_ORDER
@@ -239,37 +239,160 @@ def claim_next_task(db: Session) -> QueueTask | None:
     return task
 
 
+def _batch_flow_account(batch: Batch | None) -> str:
+    """Blank means Automatic / load balance."""
+    return useapi.normalize_account_email(getattr(batch, "flow_account_email", None) if batch else "")
+
+
+def _same_account(stored: str | None, selected: str | None) -> bool:
+    return useapi.normalize_account_email(stored).lower() == useapi.normalize_account_email(selected).lower()
+
+
 def _upload_avatar_if_needed(db: Session, batch: Batch) -> str:
-    if batch.avatar_media_id:
+    selected_account = _batch_flow_account(batch)
+    # Automatic can reuse any existing asset. A specific account must own the asset.
+    if batch.avatar_media_id and (not selected_account or _same_account(batch.avatar_source_email, selected_account)):
         return batch.avatar_media_id
     if not batch.avatar_b64:
         raise RuntimeError("Batch has no avatar image. Add an avatar before generating.")
     raw = base64.b64decode(batch.avatar_b64)
-    batch.avatar_media_id = useapi.upload_asset(raw, batch.avatar_mime or "image/jpeg", settings().google_flow_email)
+    uploaded = useapi.upload_asset(raw, batch.avatar_mime or "image/jpeg", selected_account)
+    batch.avatar_media_id = str(uploaded.get("media_id") or "")
+    batch.avatar_source_email = str(uploaded.get("email") or selected_account or "").strip() or None
     db.add(batch)
     db.flush()
     return batch.avatar_media_id
 
 
-def _ensure_product_refs(db: Session, job: ProductJob, avatar_media_id: str | None = None) -> list[str]:
-    selected = _as_list(job.selected_refs)
+def _product_ref_records(job: ProductJob) -> list[dict]:
+    records = _as_list(getattr(job, "flow_product_refs", None))
+    out: list[dict] = []
+    for item in records:
+        if not isinstance(item, dict):
+            continue
+        url = str(item.get("sourceUrl") or item.get("source_url") or "").strip()
+        media_id = str(item.get("mediaGenerationId") or item.get("media_id") or "").strip()
+        source_email = str(item.get("sourceEmail") or item.get("source_email") or "").strip()
+        if media_id:
+            out.append({"sourceUrl": url, "mediaGenerationId": media_id, "sourceEmail": source_email})
+    # Upgrade old cached IDs lazily. Missing sourceEmail deliberately forces a re-upload
+    # when the user pins the batch to a specific account.
+    if not out:
+        selected = [str(x) for x in _as_list(job.selected_refs)]
+        legacy = [str(x) for x in _as_list(job.flow_product_ref_ids)]
+        for idx, media_id in enumerate(legacy):
+            if media_id:
+                out.append({
+                    "sourceUrl": selected[idx] if idx < len(selected) else "",
+                    "mediaGenerationId": media_id,
+                    "sourceEmail": "",
+                })
+    return out
+
+
+def _upload_remote_reference(url: str, account_email: str) -> dict:
+    data, mime = sociavault.fetch_remote_image(str(url))
+    uploaded = useapi.upload_asset(data, mime, account_email)
+    return {
+        "sourceUrl": str(url),
+        "mediaGenerationId": str(uploaded.get("media_id") or ""),
+        "sourceEmail": str(uploaded.get("email") or account_email or "").strip(),
+    }
+
+
+def _ensure_product_refs(db: Session, job: ProductJob, batch: Batch) -> list[str]:
+    selected = [str(x) for x in _as_list(job.selected_refs) if str(x).strip()]
     if not selected:
         raise RuntimeError("No selected product reference images.")
+    selected = selected[: settings().max_product_refs]
     signature = hashlib.sha1("|".join(selected).encode("utf-8")).hexdigest()
-    existing_refs = _as_list(job.flow_product_ref_ids)
-    if job.ref_signature == signature and existing_refs:
-        return ([avatar_media_id] if avatar_media_id else []) + existing_refs
-    ids = []
-    for url in selected[: settings().max_product_refs]:
-        data, mime = sociavault.fetch_remote_image(str(url))
-        ids.append(useapi.upload_asset(data, mime, settings().google_flow_email))
+    selected_account = _batch_flow_account(batch)
+    records = _product_ref_records(job) if job.ref_signature == signature else []
+    by_url = {str(r.get("sourceUrl") or ""): dict(r) for r in records if r.get("sourceUrl")}
+
+    new_records: list[dict] = []
+    for idx, url in enumerate(selected):
+        record = by_url.get(url)
+        if record is None and idx < len(records) and not records[idx].get("sourceUrl"):
+            record = dict(records[idx])
+            record["sourceUrl"] = url
+        media_id = str((record or {}).get("mediaGenerationId") or "").strip()
+        source_email = str((record or {}).get("sourceEmail") or "").strip()
+
+        # Automatic: new uploads must go to /assets, but an existing cached asset can be reused.
+        # Specific: the asset must live on that account; migrate it automatically when needed.
+        if not media_id or (selected_account and not _same_account(source_email, selected_account)):
+            record = _upload_remote_reference(url, selected_account)
+        else:
+            record = dict(record or {})
+            record.update({"sourceUrl": url, "mediaGenerationId": media_id, "sourceEmail": source_email})
+        new_records.append(record)
+
+    ids = [str(r.get("mediaGenerationId") or "") for r in new_records if r.get("mediaGenerationId")]
     if not ids:
         raise RuntimeError("No product references could be uploaded to Flow.")
-    job.flow_product_ref_ids = ids
+    job.flow_product_refs = new_records
+    job.flow_product_ref_ids = ids  # keep legacy field in sync
     job.ref_signature = signature
     db.add(job)
     db.flush()
-    return ([avatar_media_id] if avatar_media_id else []) + ids
+    return ids
+
+
+def _asset_bytes(media_id: str, fallback_url: str = "") -> tuple[bytes, str]:
+    if media_id:
+        raw, err = useapi.download_raw_asset(media_id)
+        if raw:
+            return raw, "image/jpeg"
+    if fallback_url:
+        raw, mime = useapi.download_url(fallback_url, 120)
+        return raw, mime or "image/jpeg"
+    raise RuntimeError("Could not recover the stored reference asset for account migration.")
+
+
+def _ensure_job_image_account(db: Session, job: ProductJob, batch: Batch) -> str:
+    """Move an approved/generated image when a batch is switched to another specific account."""
+    selected_account = _batch_flow_account(batch)
+    if not job.image_media_id:
+        raise RuntimeError("No completed image media ID.")
+    if not selected_account or _same_account(job.image_source_email, selected_account):
+        return job.image_media_id
+    raw, mime = _asset_bytes(job.image_media_id, job.image_url or "")
+    uploaded = useapi.upload_asset(raw, mime, selected_account)
+    job.image_media_id = str(uploaded.get("media_id") or "")
+    job.image_source_email = str(uploaded.get("email") or selected_account or "").strip() or None
+    job.image_url = useapi.resolve_asset_url(job.image_media_id) or job.image_url
+    db.add(job)
+    db.flush()
+    return job.image_media_id
+
+
+def _ensure_editorial_image_account(db: Session, job: ProductJob, batch: Batch, shot: str) -> str:
+    item = _editorial_shot(job, shot)
+    media_id = str(item.get("image_media_id") or "").strip()
+    if not media_id:
+        raise RuntimeError(f"Editorial frame {shot} is missing its start-image media ID.")
+    selected_account = _batch_flow_account(batch)
+    source_email = str(item.get("image_source_email") or "").strip()
+    if not selected_account or _same_account(source_email, selected_account):
+        return media_id
+    raw, mime = _asset_bytes(media_id, str(item.get("image_url") or ""))
+    uploaded = useapi.upload_asset(raw, mime, selected_account)
+    new_id = str(uploaded.get("media_id") or "")
+    new_email = str(uploaded.get("email") or selected_account or "").strip()
+    _update_editorial_shot(
+        job, shot,
+        image_media_id=new_id,
+        image_source_email=new_email,
+        image_url=useapi.resolve_asset_url(new_id) or str(item.get("image_url") or ""),
+    )
+    if str(shot).upper() == "A":
+        job.image_media_id = new_id
+        job.image_source_email = new_email or None
+        job.image_url = str(_editorial_shot(job, shot).get("image_url") or job.image_url or "")
+    db.add(job)
+    db.flush()
+    return new_id
 
 
 def run_import_product(db: Session, task: QueueTask) -> None:
@@ -327,13 +450,13 @@ def run_generate_image(db: Session, task: QueueTask) -> None:
 
     if (batch.mode or "fashion_tryon") == "shoe_showcase":
         # Shoe showcase uses product references only. No saved avatar/person reference is sent.
-        refs = _ensure_product_refs(db, job, None)
+        refs = _ensure_product_refs(db, job, batch)
         prompt_text = shoe_showcase_image_prompt(
             job, refs_count=len(refs), creator_profile=batch.creator_profile or "Female"
         )
     else:
         avatar_media_id = _upload_avatar_if_needed(db, batch)
-        refs = _ensure_product_refs(db, job, avatar_media_id)
+        refs = [avatar_media_id] + _ensure_product_refs(db, job, batch)
         prompt_text = image_prompt(
             job,
             scene=job.scene_override or batch.scene or "Modern apartment mirror",
@@ -343,12 +466,13 @@ def run_generate_image(db: Session, task: QueueTask) -> None:
     result = useapi.generate_image(
         prompt_text,
         refs,
-        settings().google_flow_email,
+        _batch_flow_account(batch),
     )
     job.image_job_id = result.get("job_id")
     job.image_media_id = result.get("media_id")
     job.image_url = result.get("url")
     job.image_seed = result.get("seed")
+    job.image_source_email = str(result.get("email") or _batch_flow_account(batch) or "").strip() or None
     job.image_status = "completed"
     job.image_error = None
     job.approved = bool(batch.auto_approve)
@@ -383,11 +507,10 @@ def run_generate_editorial_frame(db: Session, task: QueueTask) -> None:
     db.add(job)
     db.flush()
 
-    product_refs = _ensure_product_refs(db, job, None)
+    product_refs = _ensure_product_refs(db, job, batch)
     refs = list(product_refs)
     if shot in {"B", "C"}:
-        opener = _editorial_shot(job, "A")
-        opener_media = str(opener.get("image_media_id") or "").strip()
+        opener_media = _ensure_editorial_image_account(db, job, batch, "A")
         if not opener_media:
             raise RuntimeError("Opening frame A must finish before frames B/C can use it for shoe consistency.")
         # Keep original product refs primary; add the approved opener as a consistency reference.
@@ -405,7 +528,7 @@ def run_generate_editorial_frame(db: Session, task: QueueTask) -> None:
     db.add(task)
     db.flush()
 
-    result = useapi.generate_image(prompt_text, refs, settings().google_flow_email)
+    result = useapi.generate_image(prompt_text, refs, _batch_flow_account(batch))
     media_id = str(result.get("media_id") or "")
     image_url = str(result.get("url") or "") or useapi.resolve_asset_url(media_id)
     _update_editorial_shot(
@@ -416,6 +539,7 @@ def run_generate_editorial_frame(db: Session, task: QueueTask) -> None:
         image_url=image_url,
         image_error="",
         image_seed=result.get("seed") or "",
+        image_source_email=str(result.get("email") or _batch_flow_account(batch) or "").strip(),
     )
 
     # Preserve the opener in the legacy image fields so existing cards, Sheets and Drive
@@ -425,6 +549,7 @@ def run_generate_editorial_frame(db: Session, task: QueueTask) -> None:
         job.image_media_id = media_id
         job.image_url = image_url
         job.image_seed = result.get("seed")
+        job.image_source_email = str(result.get("email") or _batch_flow_account(batch) or "").strip() or None
         # Frame A establishes product consistency. Generate B then C sequentially so
         # JSON shot state cannot be overwritten by concurrent workers on the same product.
         next_item = _editorial_shot(job, "B")
@@ -513,7 +638,7 @@ def run_submit_editorial_clip(db: Session, task: QueueTask) -> None:
         raise RuntimeError("Batch no longer exists.")
     shot = str((task.payload or {}).get("shot") or "A").upper()
     item = _editorial_shot(job, shot)
-    start_media = str(item.get("image_media_id") or "")
+    start_media = _ensure_editorial_image_account(db, job, batch, shot)
     if not start_media:
         raise RuntimeError(f"Editorial frame {shot} is missing its start-image media ID.")
 
@@ -532,8 +657,13 @@ def run_submit_editorial_clip(db: Session, task: QueueTask) -> None:
     db.add(job)
     db.flush()
 
-    result = useapi.submit_video(start_media, prompt_text, settings().google_flow_email, duration=4)
-    _update_editorial_shot(job, shot, video_status=str(result.get("status") or "created").lower(), video_job_id=result["job_id"])
+    result = useapi.submit_video(start_media, prompt_text, _batch_flow_account(batch), duration=4)
+    _update_editorial_shot(
+        job, shot,
+        video_status=str(result.get("status") or "created").lower(),
+        video_job_id=result["job_id"],
+        video_source_email=str(result.get("email") or _batch_flow_account(batch) or "").strip(),
+    )
     job.stage = "editorial_clips_processing"
     db.add(job)
     db.flush()
@@ -733,6 +863,9 @@ def run_stitch_editorial_video(db: Session, task: QueueTask) -> None:
     job = db.get(ProductJob, task.job_id)
     if not job:
         raise RuntimeError("Product job no longer exists.")
+    batch = db.get(Batch, job.batch_id)
+    if not batch:
+        raise RuntimeError("Batch no longer exists.")
     if not _all_editorial(job, "upscale_status"):
         raise RuntimeError("All three editorial clips must be upscaled before stitching.")
 
@@ -754,7 +887,9 @@ def run_stitch_editorial_video(db: Session, task: QueueTask) -> None:
         clips[shot] = raw
 
     final_bytes = editorial.stitch_editorial_clips(clips)
-    final_media_id = useapi.upload_video_asset(final_bytes, settings().google_flow_email)
+    uploaded = useapi.upload_video_asset(final_bytes, _batch_flow_account(batch))
+    final_media_id = str(uploaded.get("media_id") or "")
+    final_source_email = str(uploaded.get("email") or _batch_flow_account(batch) or "").strip()
     final_url = useapi.resolve_asset_url(final_media_id)
 
     job.video_source_media_id = final_media_id
@@ -763,6 +898,7 @@ def run_stitch_editorial_video(db: Session, task: QueueTask) -> None:
     job.video_media_id = final_media_id
     job.video_url = final_url
     job.video_resolution = settings().video_final_resolution
+    job.video_source_email = final_source_email or None
     job.video_status = "completed"
     job.upscale_status = "completed"
     job.video_error = None
@@ -786,6 +922,8 @@ def run_submit_video(db: Session, task: QueueTask) -> None:
         raise RuntimeError("No completed image media ID.")
     if not job.approved:
         raise RuntimeError("Image is not approved for video yet.")
+
+    start_media = _ensure_job_image_account(db, job, batch)
 
     job.stage = "submitting_video"
     job.video_status = "created"
@@ -811,8 +949,9 @@ def run_submit_video(db: Session, task: QueueTask) -> None:
     db.add(task)
     db.flush()
 
-    result = useapi.submit_video(job.image_media_id, prompt_text, settings().google_flow_email, duration=10 if shoe_mode else None)
+    result = useapi.submit_video(start_media, prompt_text, _batch_flow_account(batch), duration=10 if shoe_mode else None)
     job.video_job_id = result["job_id"]
+    job.video_source_email = str(result.get("email") or _batch_flow_account(batch) or "").strip() or None
     job.video_status = str(result.get("status") or "created").lower()
     job.stage = "video_processing"
     db.add(job)

@@ -28,6 +28,7 @@ class CreateBatchRequest(BaseModel):
     avatar_b64: str | None = None
     avatar_mime: str = "image/jpeg"
     avatar_name: str | None = None
+    flow_account_email: str | None = None
 
 
 class ImportProductsRequest(BaseModel):
@@ -47,6 +48,10 @@ class SelectProductRefsRequest(BaseModel):
     focus: str | None = None
     scene: str | None = None
     motion_style: str | None = None
+
+
+class UpdateFlowAccountRequest(BaseModel):
+    flow_account_email: str | None = None
 
 
 class UpdateJobSettingsRequest(BaseModel):
@@ -107,6 +112,7 @@ class BatchOut(BaseModel):
     id: str
     name: str | None
     avatar_name: str | None = None
+    flow_account_email: str | None = None
     mode: str = "fashion_tryon"
     scene: str | None
     scene_pool: list[str] = Field(default_factory=list)

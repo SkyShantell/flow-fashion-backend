@@ -27,8 +27,9 @@ from backend.schemas import (
     SelectProductRefsRequest,
     SaveAvatarRequest,
     UpdateJobSettingsRequest,
+    UpdateFlowAccountRequest,
 )
-from backend.services import sheets
+from backend.services import sheets, useapi
 from backend.prompts import MOTION_STYLES, SCENES, SHOE_SHOWCASE_MOTION, SHOE_SHOWCASE_SCENE, default_motion_style, video_prompt, shoe_showcase_video_prompt
 from backend.tasks import enqueue_task, run_one_claimed_task
 
@@ -178,6 +179,7 @@ def batch_out(batch: Batch, db: Session) -> BatchOut:
         id=batch.id,
         name=batch.name,
         avatar_name=batch.avatar_name,
+        flow_account_email=batch.flow_account_email,
         mode=batch.mode or "fashion_tryon",
         scene=batch.scene,
         scene_pool=_scene_pool(batch),
@@ -205,6 +207,17 @@ def health():
         "video_native_resolution": cfg.video_native_resolution,
         "video_final_resolution": cfg.video_final_resolution,
     }
+
+
+@app.get("/api/flow/accounts", dependencies=[Depends(require_api_key)])
+def flow_accounts_status():
+    """Sanitized UseAPI account status. USEAPI_TOKEN never leaves the backend."""
+    try:
+        return useapi.list_flow_accounts()
+    except Exception as exc:
+        raise HTTPException(502, f"Could not load Flow accounts: {exc}")
+
+
 
 
 @app.get("/avatars", response_model=list[AvatarOut], dependencies=[Depends(require_api_key)])
@@ -268,6 +281,7 @@ def create_batch(req: CreateBatchRequest, db: Session = Depends(get_db)):
         avatar_b64=avatar_b64,
         avatar_mime=req.avatar_mime or "image/jpeg",
         avatar_name=(str(req.avatar_name or "").strip()[:160] or None),
+        flow_account_email=(useapi.normalize_account_email(req.flow_account_email) or None),
     )
     db.add(batch)
     db.commit()
@@ -284,6 +298,7 @@ def create_batch_form(
     video_style: str = Form("Academy — Boss / Calm"),
     auto_approve: bool = Form(False),
     avatar_name: str = Form(""),
+    flow_account_email: str = Form(""),
     avatar: UploadFile | None = File(None),
     db: Session = Depends(get_db),
 ):
@@ -316,6 +331,7 @@ def create_batch_form(
         avatar_b64=avatar_b64,
         avatar_mime=avatar_mime,
         avatar_name=(str(avatar_name or "").strip()[:160] or None),
+        flow_account_email=(useapi.normalize_account_email(flow_account_email) or None),
     )
     db.add(batch)
     db.commit()
@@ -335,6 +351,31 @@ def get_batch(batch_id: str, db: Session = Depends(get_db)):
     if not batch:
         raise HTTPException(404, "Batch not found")
     return batch_out(batch, db)
+
+
+@app.put("/batches/{batch_id}/flow-account", response_model=BatchOut, dependencies=[Depends(require_api_key)])
+def update_batch_flow_account(batch_id: str, req: UpdateFlowAccountRequest, db: Session = Depends(get_db)):
+    batch = db.get(Batch, batch_id)
+    if not batch:
+        raise HTTPException(404, "Batch not found")
+    email = useapi.normalize_account_email(req.flow_account_email)
+    if email:
+        # Validate before persisting so a typo cannot poison queued generations.
+        try:
+            detail = useapi.get_flow_account(email)
+        except Exception as exc:
+            raise HTTPException(400, f"Flow account could not be selected: {exc}")
+        resolved = str(detail.get("email") or email).strip()
+        batch.flow_account_email = resolved or email
+    else:
+        batch.flow_account_email = None
+    batch.updated_at = datetime.now(timezone.utc)
+    db.add(batch)
+    db.commit()
+    db.refresh(batch)
+    return batch_out(batch, db)
+
+
 
 
 def _require_batch_open(batch: Batch) -> None:
@@ -502,6 +543,7 @@ def select_product_references(job_id: str, req: SelectProductRefsRequest, db: Se
     job.selected_refs = refs
     # Force Flow reference uploads to be rebuilt when the user changes photos.
     job.flow_product_ref_ids = []
+    job.flow_product_refs = []
     job.ref_signature = None
     job.approved = False
     job.editorial_shots = []
@@ -510,10 +552,12 @@ def select_product_references(job_id: str, req: SelectProductRefsRequest, db: Se
     job.image_job_id = None
     job.image_media_id = None
     job.image_url = None
+    job.image_source_email = None
     job.video_status = "pending"
     job.video_job_id = None
     job.video_source_media_id = None
     job.video_source_url = None
+    job.video_source_email = None
     job.upscale_status = "pending"
     job.upscale_job_id = None
     job.video_media_id = None
@@ -647,6 +691,7 @@ def regenerate_video(job_id: str, req: RegenerateVideoRequest, db: Session = Dep
     job.video_source_media_id = None
     job.video_source_url = None
     job.video_source_resolution = None
+    job.video_source_email = None
     job.thumbnail_url = None
     job.video_error = None
     job.upscale_status = "pending"
@@ -740,8 +785,8 @@ def regenerate_editorial_frame(job_id: str, shot: str, req: EditorialRegenerateR
     for target in targets:
         _editorial_update(
             job, target,
-            image_status="pending", image_media_id="", image_url="", image_error="",
-            video_status="pending", video_job_id="", video_media_id="", video_url="", video_error="",
+            image_status="pending", image_media_id="", image_url="", image_source_email="", image_error="",
+            video_status="pending", video_job_id="", video_media_id="", video_url="", video_source_email="", video_error="",
             upscale_status="pending", upscale_job_id="", upscaled_media_id="", upscaled_url="", upscale_error="",
         )
     job.approved = False
@@ -752,6 +797,7 @@ def regenerate_editorial_frame(job_id: str, shot: str, req: EditorialRegenerateR
         job.image_media_id = None
         job.image_url = None
         job.image_seed = None
+        job.image_source_email = None
     job.video_status = "pending"
     job.upscale_status = "pending"
     job.video_media_id = None

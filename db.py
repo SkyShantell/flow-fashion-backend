@@ -41,14 +41,10 @@ def _add_missing_columns() -> None:
             "ALTER TABLE batches ADD COLUMN IF NOT EXISTS scene_pool JSON",
             "ALTER TABLE batches ADD COLUMN IF NOT EXISTS motion_pool JSON",
             "ALTER TABLE batches ADD COLUMN IF NOT EXISTS avatar_name VARCHAR(160)",
-            "ALTER TABLE batches ADD COLUMN IF NOT EXISTS avatar_source_email VARCHAR(320)",
-            "ALTER TABLE batches ADD COLUMN IF NOT EXISTS flow_account_email VARCHAR(320)",
             "ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS scene_override VARCHAR(120)",
             "ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS motion_style_override VARCHAR(80)",
             "ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS editorial_shots JSON",
-            "ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS flow_product_refs JSON",
-            "ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS image_source_email VARCHAR(320)",
-            "ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS video_source_email VARCHAR(320)",
+            "ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS sniper_meta JSON",
         ]
         with engine.begin() as conn:
             for sql in statements:
@@ -62,16 +58,12 @@ def _add_missing_columns() -> None:
             "scene_pool": "JSON",
             "motion_pool": "JSON",
             "avatar_name": "VARCHAR(160)",
-            "avatar_source_email": "VARCHAR(320)",
-            "flow_account_email": "VARCHAR(320)",
         },
         "product_jobs": {
             "scene_override": "VARCHAR(120)",
             "motion_style_override": "VARCHAR(80)",
             "editorial_shots": "JSON",
-            "flow_product_refs": "JSON",
-            "image_source_email": "VARCHAR(320)",
-            "video_source_email": "VARCHAR(320)",
+            "sniper_meta": "JSON",
         },
     }
     with engine.begin() as conn:

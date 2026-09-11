@@ -4,6 +4,7 @@ import base64
 import io
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import quote
 
 import requests
@@ -83,6 +84,113 @@ def request_json(method: str, url: str, *, headers=None, params=None, json_body=
     raise RuntimeError(last_error or "Request failed")
 
 
+def normalize_account_email(value: str | None) -> str:
+    """Normalize the optional Flow account selector. Blank means automatic/load-balance."""
+    return str(value or "").strip()
+
+
+def _account_summary(email: str, payload: dict | None) -> dict:
+    payload = payload if isinstance(payload, dict) else {}
+    credits_block = payload.get("credits") if isinstance(payload.get("credits"), dict) else {}
+    session_block = payload.get("sessionData") if isinstance(payload.get("sessionData"), dict) else {}
+    # Some API responses nest the actual account under response/account/data.
+    for key in ("account", "response", "data"):
+        nested = payload.get(key)
+        if isinstance(nested, dict) and (nested.get("health") is not None or nested.get("credits") is not None):
+            payload = nested
+            credits_block = payload.get("credits") if isinstance(payload.get("credits"), dict) else credits_block
+            session_block = payload.get("sessionData") if isinstance(payload.get("sessionData"), dict) else session_block
+            break
+    credits_value = credits_block.get("credits") if credits_block else payload.get("credits")
+    tier = credits_block.get("userPaygateTier") if credits_block else None
+    if tier is None:
+        tier = payload.get("userPaygateTier") or payload.get("paygateTier")
+    return {
+        "email": str(payload.get("email") or email),
+        "health": str(payload.get("health") or "unknown"),
+        "credits": credits_value if isinstance(credits_value, (int, float)) else None,
+        "paygate_tier": str(tier or ""),
+        "created": payload.get("created"),
+        "session_expiry": session_block.get("expires") or payload.get("sessionExpiry") or payload.get("session_expiry"),
+    }
+
+
+def get_flow_account(email: str) -> dict:
+    cfg = settings()
+    email = normalize_account_email(email)
+    if not email:
+        raise RuntimeError("Flow account email is required.")
+    payload = request_json(
+        "GET",
+        f"{cfg.flow_base}/accounts/{quote(email, safe='')}",
+        headers=flow_headers(cfg.useapi_token),
+        timeout=60,
+        retries=1,
+    )
+    return _account_summary(email, payload)
+
+
+def list_flow_accounts() -> list[dict]:
+    """Return sanitized account status for every connected Google Flow account."""
+    cfg = settings()
+    if not cfg.useapi_token:
+        raise RuntimeError("Missing USEAPI_TOKEN")
+    payload = request_json(
+        "GET",
+        f"{cfg.flow_base}/accounts",
+        headers=flow_headers(cfg.useapi_token),
+        timeout=60,
+        retries=1,
+    )
+    emails: list[str] = []
+    if isinstance(payload, dict):
+        # Documented shape is a map keyed by email. Also accept common wrapper/list shapes.
+        candidate = payload.get("accounts")
+        if isinstance(candidate, list):
+            for item in candidate:
+                if isinstance(item, str):
+                    emails.append(item)
+                elif isinstance(item, dict) and item.get("email"):
+                    emails.append(str(item["email"]))
+        elif isinstance(candidate, dict):
+            emails.extend(str(k) for k in candidate.keys())
+        else:
+            for key, value in payload.items():
+                if "@" in str(key):
+                    emails.append(str(key))
+                elif isinstance(value, dict) and value.get("email"):
+                    emails.append(str(value.get("email")))
+    elif isinstance(payload, list):
+        for item in payload:
+            if isinstance(item, str):
+                emails.append(item)
+            elif isinstance(item, dict) and item.get("email"):
+                emails.append(str(item["email"]))
+    emails = list(dict.fromkeys(x.strip() for x in emails if str(x).strip()))
+    if not emails:
+        return []
+
+    results: dict[str, dict] = {}
+    with ThreadPoolExecutor(max_workers=min(8, len(emails))) as pool:
+        futures = {pool.submit(get_flow_account, email): email for email in emails}
+        for future in as_completed(futures):
+            email = futures[future]
+            try:
+                results[email] = future.result()
+            except Exception as exc:
+                # Keep the account visible even if one detail call temporarily fails.
+                results[email] = {
+                    "email": email,
+                    "health": "error",
+                    "credits": None,
+                    "paygate_tier": "",
+                    "created": None,
+                    "session_expiry": None,
+                    "error": str(exc)[:500],
+                }
+    return [results[email] for email in emails]
+
+
 def normalize_image_bytes(data: bytes, mime: str = "image/jpeg", max_side: int = 1800, quality: int = 92) -> tuple[bytes, str]:
     try:
         image = Image.open(io.BytesIO(data))
@@ -106,14 +214,16 @@ def normalize_image_bytes(data: bytes, mime: str = "image/jpeg", max_side: int =
         return data, "image/jpeg"
 
 
-def upload_asset(image_bytes: bytes, mime: str, email: str = "") -> str:
+def upload_asset(image_bytes: bytes, mime: str, email: str = "") -> dict:
+    """Upload an image asset. Blank email uses UseAPI automatic/load-balanced routing."""
     cfg = settings()
     if not cfg.useapi_token:
         raise RuntimeError("Missing USEAPI_TOKEN")
     image_bytes, mime = normalize_image_bytes(image_bytes, mime)
+    selected_email = normalize_account_email(email)
     url = f"{cfg.flow_base}/assets"
-    if email:
-        url += "/" + quote(email, safe="")
+    if selected_email:
+        url += "/" + quote(selected_email, safe="")
     resp = requests.post(url, headers={**flow_headers(cfg.useapi_token), "Content-Type": mime}, data=image_bytes, timeout=120)
     if resp.status_code >= 400:
         raise RuntimeError(f"Flow asset upload failed — HTTP {resp.status_code}: {parse_error(resp)}")
@@ -123,20 +233,21 @@ def upload_asset(image_bytes: bytes, mime: str, email: str = "") -> str:
         media = media.get("mediaGenerationId")
     if not media:
         raise RuntimeError("Flow uploaded the asset but returned no mediaGenerationId.")
-    return str(media)
+    used_email = str(payload.get("email") or selected_email or "").strip()
+    return {"media_id": str(media), "email": used_email}
 
 
-
-def upload_video_asset(video_bytes: bytes, email: str = "") -> str:
-    """Upload an already-rendered MP4 back to Flow assets so the dashboard has a durable media id/url."""
+def upload_video_asset(video_bytes: bytes, email: str = "") -> dict:
+    """Upload an already-rendered MP4; blank email lets UseAPI choose the account."""
     cfg = settings()
     if not cfg.useapi_token:
         raise RuntimeError("Missing USEAPI_TOKEN")
     if not video_bytes:
         raise RuntimeError("No video bytes to upload")
+    selected_email = normalize_account_email(email)
     url = f"{cfg.flow_base}/assets"
-    if email:
-        url += "/" + quote(email, safe="")
+    if selected_email:
+        url += "/" + quote(selected_email, safe="")
     resp = requests.post(
         url,
         headers={**flow_headers(cfg.useapi_token), "Content-Type": "video/mp4"},
@@ -151,18 +262,20 @@ def upload_video_asset(video_bytes: bytes, email: str = "") -> str:
         media = media.get("mediaGenerationId")
     if not media:
         raise RuntimeError("Flow uploaded the stitched MP4 but returned no mediaGenerationId.")
-    return str(media)
+    used_email = str(payload.get("email") or selected_email or "").strip()
+    return {"media_id": str(media), "email": used_email}
 
 def generate_image(prompt: str, refs: list[str], email: str = "") -> dict:
     cfg = settings()
+    selected_email = normalize_account_email(email)
     body = {
         "model": cfg.image_model,
         "prompt": prompt,
         "aspectRatio": "9:16",
         "count": 1,
     }
-    if email:
-        body["email"] = email
+    if selected_email:
+        body["email"] = selected_email
     for i, ref in enumerate(refs[:10], start=1):
         body[f"reference_{i}"] = ref
     payload = request_json("POST", f"{cfg.flow_base}/images", headers=flow_headers(cfg.useapi_token, True), json_body=body, timeout=180, retries=1)
@@ -179,11 +292,13 @@ def generate_image(prompt: str, refs: list[str], email: str = "") -> dict:
         "url": generated.get("fifeUrl") or generated.get("url"),
         "encoded": generated.get("encodedImage"),
         "seed": generated.get("seed"),
+        "email": str(payload.get("email") or selected_email or "").strip(),
     }
 
 
 def submit_video(image_media_id: str, prompt: str, email: str = "", duration: int | None = None) -> dict:
     cfg = settings()
+    selected_email = normalize_account_email(email)
     body = {
         "model": cfg.video_model,
         "prompt": prompt,
@@ -194,13 +309,13 @@ def submit_video(image_media_id: str, prompt: str, email: str = "", duration: in
         "startImage": image_media_id,
         "async": True,
     }
-    if email:
-        body["email"] = email
+    if selected_email:
+        body["email"] = selected_email
     payload = request_json("POST", f"{cfg.flow_base}/videos", headers=flow_headers(cfg.useapi_token, True), json_body=body, timeout=90, retries=1)
     job_id = payload.get("jobid") or payload.get("jobId")
     if not job_id:
         raise RuntimeError("Omni submitted without returning a job ID.")
-    return {"job_id": str(job_id), "status": payload.get("status") or "created"}
+    return {"job_id": str(job_id), "status": payload.get("status") or "created", "email": str(payload.get("email") or selected_email or "").strip()}
 
 
 def submit_upscale(media_generation_id: str, resolution: str | None = None) -> dict:

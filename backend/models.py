@@ -45,7 +45,11 @@ class Batch(Base):
     avatar_b64 = Column(Text, nullable=True)
     avatar_mime = Column(String(80), default="image/jpeg")
     avatar_media_id = Column(String(500), nullable=True)
+    avatar_source_email = Column(String(320), nullable=True)
     avatar_name = Column(String(160), nullable=True)
+
+    # Null means Automatic / load balance. A value pins this batch to one Flow account.
+    flow_account_email = Column(String(320), nullable=True)
 
     status = Column(String(80), default="open")
     created_at = Column(DateTime(timezone=True), default=utcnow)
@@ -73,6 +77,9 @@ class ProductJob(Base):
     selected_refs = Column(JSON, default=list)
     editorial_shots = Column(JSON, default=list)
     flow_product_ref_ids = Column(JSON, default=list)
+    # Account-aware reference metadata. Legacy flow_product_ref_ids is retained for compatibility.
+    # Each record: {sourceUrl, mediaGenerationId, sourceEmail}.
+    flow_product_refs = Column(JSON, default=list)
     ref_signature = Column(String(80), nullable=True)
 
     stage = Column(String(80), default="pending_import", index=True)
@@ -83,6 +90,7 @@ class ProductJob(Base):
     image_media_id = Column(String(500), nullable=True)
     image_url = Column(Text, nullable=True)
     image_seed = Column(String(120), nullable=True)
+    image_source_email = Column(String(320), nullable=True)
     image_error = Column(Text, nullable=True)
 
     video_status = Column(String(80), default="pending")
@@ -98,6 +106,7 @@ class ProductJob(Base):
     video_media_id = Column(String(500), nullable=True)
     video_url = Column(Text, nullable=True)
     video_resolution = Column(String(40), nullable=True)
+    video_source_email = Column(String(320), nullable=True)
     upscale_error = Column(Text, nullable=True)
 
     drive_image_id = Column(String(160), nullable=True)
