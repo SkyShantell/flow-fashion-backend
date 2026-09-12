@@ -99,13 +99,21 @@ class ApplyTextOverlayRequest(BaseModel):
     preset: str = "luxury_serif"
     emoji_prefix: str = ""
     emoji_suffix: str = ""
-    # Transparent PNG data URLs rendered by the user's browser. On macOS/iOS the
-    # browser uses Apple Color Emoji, so Railway never needs Apple's proprietary font.
+    # Transparent PNG data URLs rendered by the user's browser.
     emoji_prefix_pngs: list[str] = Field(default_factory=list)
     emoji_suffix_pngs: list[str] = Field(default_factory=list)
+    # `apple_browser` is accepted only as a seed source. Windows/browser artwork is never
+    # allowed to overwrite the server's saved Apple emoji assets.
+    emoji_source: str = "server_cache"
     headline_color: str = "white"
     subheadline_color: str = "white"
     placement: str = "middle"
+
+
+class EmojiSeedRequest(BaseModel):
+    tokens: list[str] = Field(default_factory=list)
+    pngs: list[str] = Field(default_factory=list)
+    source: str = "apple_browser"
 
 
 class JobOut(BaseModel):
