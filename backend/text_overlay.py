@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 import subprocess
 import tempfile
@@ -14,6 +15,7 @@ from backend.services import useapi
 import backend.tasks as tasks
 
 
+log = logging.getLogger("flow-text-overlay")
 _INSTALLED = False
 _ORIGINAL_ARCHIVE_MEDIA: Callable[[Session, QueueTask], None] | None = None
 _FONT_FILES = (
@@ -140,15 +142,17 @@ def _run_archive_with_text_overlay(db: Session, task: QueueTask) -> None:
     batch = db.get(Batch, job.batch_id) if job else None
     payload = dict(task.payload or {})
 
+    # Text overlay is part of finalization, not an optional Drive-only step. Do not let
+    # an existing/stale Drive file cause a newly generated video to skip FFmpeg.
     if (
         job
         and batch
         and job.stage in {"video_complete", "complete"}
         and not payload.get("fashion_text_overlay_applied")
         and (job.video_media_id or job.video_url or job.video_source_media_id or job.video_source_url)
-        and not job.drive_video_id
     ):
         caption = _fashion_caption(job)
+        log.info("Applying fashion text overlay · job=%s · caption=%s", job.id, caption)
         original_bytes = tasks._download_final_video_for_archive(job)
         if not original_bytes:
             raise RuntimeError("Could not download the final video before adding on-screen text.")
@@ -162,13 +166,22 @@ def _run_archive_with_text_overlay(db: Session, task: QueueTask) -> None:
         job.video_url = useapi.resolve_asset_url(final_media_id) or None
         job.video_source_email = str(uploaded.get("email") or job.video_source_email or "").strip() or None
         job.video_error = None
+
+        # Any previous Drive video points at an older/raw render. Clear only the video
+        # archive references so the normal archive handler stores the text-burned MP4.
+        job.drive_video_id = None
+        job.drive_video_url = None
+        job.drive_video_download_url = None
+        job.drive_error = None
         db.add(job)
 
         payload["fashion_text_overlay_applied"] = True
         payload["fashion_text_overlay_text"] = caption
+        payload["fashion_text_overlay_media_id"] = final_media_id
         task.payload = payload
         db.add(task)
         db.flush()
+        log.info("Fashion text overlay applied · job=%s · media=%s", job.id, final_media_id)
 
     return _ORIGINAL_ARCHIVE_MEDIA(db, task)
 
