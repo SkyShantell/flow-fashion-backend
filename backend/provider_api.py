@@ -14,10 +14,11 @@ from backend.api import app, get_db, require_api_key
 from backend.flow_account_affinity import install_flow_account_affinity
 from backend.manual_ffmpeg import caption_for_job, install_manual_ffmpeg_handler
 from backend.models import Batch, ProductJob, QueueTask
-from backend.schemas import UpdateVideoProviderRequest
+from backend.schemas import ApplyTextOverlayRequest, UpdateVideoProviderRequest
 from backend.services import useapi
 from backend.shoe_o1 import install_shoe_o1_handlers, shoe_o1_images_ready
 from backend.shoe_o1_prompt import shoe_o1_video_prompt
+from backend.styled_overlay import overlay_options
 from backend.text_overlay import install_text_overlay_handler
 from backend.video_provider import install_video_provider_handlers, provider_config
 
@@ -111,8 +112,32 @@ def download_final_video(job_id: str, db: Session = Depends(get_db)):
     )
 
 
+@router.get("/jobs/{job_id}/text-overlay-config", dependencies=[Depends(require_api_key)])
+def text_overlay_config(job_id: str, db: Session = Depends(get_db)):
+    job = db.get(ProductJob, job_id)
+    if not job:
+        raise HTTPException(404, "Job not found")
+    batch = db.get(Batch, job.batch_id)
+    shoe_mode = bool(batch and (batch.mode or "fashion_tryon") == "shoe_showcase")
+    return {
+        "headline": caption_for_job(job),
+        "subheadline": "",
+        "preset": "luxury_serif" if shoe_mode else "clean_social",
+        "emoji_prefix": "",
+        "emoji_suffix": "",
+        "headline_color": "white",
+        "subheadline_color": "white",
+        "placement": "middle",
+        **overlay_options(),
+    }
+
+
 @router.post("/jobs/{job_id}/apply-text-overlay", dependencies=[Depends(require_api_key)])
-def apply_text_overlay(job_id: str, db: Session = Depends(get_db)):
+def apply_text_overlay(
+    job_id: str,
+    req: ApplyTextOverlayRequest | None = None,
+    db: Session = Depends(get_db),
+):
     job = db.get(ProductJob, job_id)
     if not job:
         raise HTTPException(404, "Job not found")
@@ -137,9 +162,15 @@ def apply_text_overlay(job_id: str, db: Session = Depends(get_db)):
         return {
             "ok": True,
             "status": active.status,
-            "caption": caption_for_job(job),
+            "caption": str((active.payload or {}).get("headline") or caption_for_job(job)),
             "task_id": active.id,
         }
+
+    request = req or ApplyTextOverlayRequest()
+    headline = " ".join(str(request.headline or caption_for_job(job)).split()).strip()[:120]
+    subheadline = " ".join(str(request.subheadline or "").split()).strip()[:120]
+    if not headline and not subheadline:
+        raise HTTPException(400, "Add at least one line of text")
 
     job.stage = "finalizing_text"
     db.add(job)
@@ -149,7 +180,17 @@ def apply_text_overlay(job_id: str, db: Session = Depends(get_db)):
         "apply_text_overlay",
         job_id=job.id,
         batch_id=job.batch_id,
-        payload={"video_job_id": str(job.video_job_id or "")},
+        payload={
+            "video_job_id": str(job.video_job_id or ""),
+            "headline": headline,
+            "subheadline": subheadline,
+            "preset": str(request.preset or "luxury_serif")[:40],
+            "emoji_prefix": str(request.emoji_prefix or "")[:80],
+            "emoji_suffix": str(request.emoji_suffix or "")[:80],
+            "headline_color": str(request.headline_color or "white")[:30],
+            "subheadline_color": str(request.subheadline_color or "white")[:30],
+            "placement": str(request.placement or "middle")[:20],
+        },
         priority=75,
         max_attempts=2,
         allow_duplicate=True,
@@ -158,7 +199,7 @@ def apply_text_overlay(job_id: str, db: Session = Depends(get_db)):
     return {
         "ok": True,
         "status": "queued",
-        "caption": caption_for_job(job),
+        "caption": headline,
         "task_id": task.id,
     }
 
@@ -176,7 +217,8 @@ def video_provider_health():
         "kling_audio": False,
         "automatic_fallback": False,
         "fashion_text_overlay": True,
-        "ffmpeg_text_mode": "manual",
+        "ffmpeg_text_mode": "manual_styled",
+        "ffmpeg_color_emoji": True,
     }
 
 
