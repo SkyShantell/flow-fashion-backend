@@ -98,10 +98,12 @@ def _burn_text(video_bytes: bytes, caption: str, placement_seed: str) -> bytes:
     if not video_bytes:
         raise RuntimeError("No final video bytes were available for the text overlay.")
 
+    # Keep every caption near the visual center of the frame, while retaining a little
+    # horizontal/vertical variation so consecutive videos do not look templated.
     placements = [
-        ("(w-text_w)/2", "h*0.56"),
-        ("w*0.055", "h*0.34"),
-        ("(w-text_w)/2", "h*0.66"),
+        ("(w-text_w)/2", "h*0.50"),
+        ("w*0.055", "h*0.46"),
+        ("(w-text_w)/2", "h*0.54"),
     ]
     idx = sum(ord(ch) for ch in str(placement_seed or "")) % len(placements)
     x_expr, y_expr = placements[idx]
@@ -116,7 +118,7 @@ def _burn_text(video_bytes: bytes, caption: str, placement_seed: str) -> bytes:
 
         drawtext = (
             f"drawtext=fontfile={_font_file()}:textfile={text_path}:expansion=none:"
-            "fontcolor=white:fontsize=h*0.024:borderw=1:bordercolor=black@0.30:"
+            "fontcolor=white:fontsize=h*0.029:borderw=1:bordercolor=black@0.30:"
             "shadowcolor=black@0.45:shadowx=1:shadowy=1:line_spacing=6:fix_bounds=1:"
             f"x={x_expr}:y={y_expr}"
         )
