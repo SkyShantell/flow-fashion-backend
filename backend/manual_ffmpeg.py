@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from backend.models import Batch, ProductJob, QueueTask
 from backend.services import useapi
+from backend.styled_overlay import render_styled_overlay
 import backend.tasks as tasks
 import backend.text_overlay as text_overlay
 
@@ -17,7 +18,7 @@ _ORIGINAL_ARCHIVE_MEDIA: Callable[[Session, QueueTask], None] | None = None
 
 
 def caption_for_job(job: ProductJob) -> str:
-    """Return the same selected/default hook used by the existing FFmpeg renderer."""
+    """Return the selected/default hook as the starting text in the manual style editor."""
     return text_overlay._fashion_caption(job)
 
 
@@ -54,13 +55,38 @@ def run_apply_text_overlay(db: Session, task: QueueTask) -> None:
     db.flush()
 
     try:
-        caption = caption_for_job(job)
-        log.info("Manual FFmpeg text started · job=%s · caption=%s", job.id, caption)
+        headline = str(payload.get("headline") or caption_for_job(job)).strip()[:120]
+        subheadline = str(payload.get("subheadline") or "").strip()[:120]
+        preset = str(payload.get("preset") or "luxury_serif").strip()[:40]
+        emoji_prefix = str(payload.get("emoji_prefix") or "").strip()[:80]
+        emoji_suffix = str(payload.get("emoji_suffix") or "").strip()[:80]
+        headline_color = str(payload.get("headline_color") or "white").strip()[:30]
+        subheadline_color = str(payload.get("subheadline_color") or "white").strip()[:30]
+        placement = str(payload.get("placement") or "middle").strip()[:20]
+
+        log.info(
+            "Manual styled FFmpeg started · job=%s · preset=%s · headline=%s",
+            job.id,
+            preset,
+            headline,
+        )
         original_bytes = tasks._download_final_video_for_archive(job)
         if not original_bytes:
             raise RuntimeError("Could not download the returned video for FFmpeg.")
 
-        final_bytes = text_overlay._burn_text(original_bytes, caption, job.id)
+        # Text and color emoji are rendered into a transparent PNG layer first. FFmpeg only
+        # composites that finished layer onto the video, so mixed fonts and emoji stay reliable.
+        final_bytes = render_styled_overlay(
+            original_bytes,
+            headline=headline,
+            subheadline=subheadline,
+            preset=preset,
+            emoji_prefix=emoji_prefix,
+            emoji_suffix=emoji_suffix,
+            headline_color=headline_color,
+            subheadline_color=subheadline_color,
+            placement=placement,
+        )
         uploaded = useapi.upload_video_asset(final_bytes, tasks._batch_flow_account(batch))
         final_media_id = str(uploaded.get("media_id") or "").strip()
         if not final_media_id:
@@ -82,7 +108,14 @@ def run_apply_text_overlay(db: Session, task: QueueTask) -> None:
         payload.update({
             "manual_ffmpeg_done": True,
             "fashion_text_overlay_applied": True,
-            "fashion_text_overlay_text": caption,
+            "fashion_text_overlay_text": headline,
+            "fashion_text_overlay_subheadline": subheadline,
+            "fashion_text_overlay_preset": preset,
+            "fashion_text_overlay_emoji_prefix": emoji_prefix,
+            "fashion_text_overlay_emoji_suffix": emoji_suffix,
+            "fashion_text_overlay_headline_color": headline_color,
+            "fashion_text_overlay_subheadline_color": subheadline_color,
+            "fashion_text_overlay_placement": placement,
             "fashion_text_overlay_media_id": final_media_id,
             "video_job_id": current_video_job_id,
         })
@@ -109,7 +142,7 @@ def run_apply_text_overlay(db: Session, task: QueueTask) -> None:
             max_attempts=2,
             allow_duplicate=True,
         )
-        log.info("Manual FFmpeg text completed · job=%s · media=%s", job.id, final_media_id)
+        log.info("Manual styled FFmpeg completed · job=%s · media=%s", job.id, final_media_id)
     except Exception:
         # Keep the raw returned video usable if FFmpeg ultimately fails.
         if int(task.attempts or 0) >= int(task.max_attempts or 1):
