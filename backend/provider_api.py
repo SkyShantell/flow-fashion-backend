@@ -10,11 +10,13 @@ from backend.flow_account_affinity import install_flow_account_affinity
 from backend.models import Batch
 from backend.schemas import UpdateVideoProviderRequest
 from backend.services import useapi
+from backend.text_overlay import install_text_overlay_handler
 from backend.video_provider import provider_config
 
 
 router = APIRouter()
 install_flow_account_affinity()
+install_text_overlay_handler()
 
 
 @router.get("/api/video-provider/health")
@@ -27,6 +29,7 @@ def video_provider_health():
         "kling_audio": False,
         "kling_multi_shot": False,
         "automatic_fallback": False,
+        "fashion_text_overlay": True,
     }
 
 
@@ -67,19 +70,15 @@ def update_batch_video_provider(
 
     if provider == "kling":
         try:
-            # Resolve now so the UI fails immediately if Kling is not connected, rather
-            # than silently changing providers later. Blank chooses the first configured account.
             account = useapi.resolve_kling_account_email(
                 req.kling_account_email or batch.kling_account_email or ""
             )
         except Exception as exc:
             raise HTTPException(400, f"Kling 3.0 could not be selected: {exc}")
         batch.kling_account_email = account
-        # Flow Clothes intentionally locks this option to the production settings requested.
         batch.kling_model = "kling-v3-0"
         batch.kling_mode = "pro"
     else:
-        # Preserve the last Kling account so switching back later is one click.
         batch.kling_model = "kling-v3-0"
         batch.kling_mode = "pro"
 
@@ -91,7 +90,4 @@ def update_batch_video_provider(
     return provider_config(batch)
 
 
-# Register these routes explicitly on the existing Flow Fashion FastAPI app.
-# Keeping registration here lets Railway run backend.provider_api:app while
-# preserving all existing backend.api routes.
 app.include_router(router)
