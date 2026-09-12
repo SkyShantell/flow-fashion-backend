@@ -88,6 +88,22 @@ def _provider_config(batch: Batch) -> dict:
     return provider_config(batch)
 
 
+def _safe_emoji_pngs(values: list[str] | None) -> list[str]:
+    """Accept only small browser-rendered transparent PNG data URLs."""
+    out: list[str] = []
+    for raw in list(values or [])[:8]:
+        value = str(raw or "").strip()
+        if not value:
+            # Preserve token alignment when one local render fails.
+            out.append("")
+            continue
+        if value.startswith("data:image/png;base64,") and len(value) <= 450_000:
+            out.append(value)
+        else:
+            out.append("")
+    return out
+
+
 @router.get("/jobs/{job_id}/download-video", dependencies=[Depends(require_api_key)])
 def download_final_video(job_id: str, db: Session = Depends(get_db)):
     job = db.get(ProductJob, job_id)
@@ -172,6 +188,9 @@ def apply_text_overlay(
     if not headline and not subheadline:
         raise HTTPException(400, "Add at least one line of text")
 
+    prefix_pngs = _safe_emoji_pngs(request.emoji_prefix_pngs)
+    suffix_pngs = _safe_emoji_pngs(request.emoji_suffix_pngs)
+
     job.stage = "finalizing_text"
     db.add(job)
     db.flush()
@@ -187,6 +206,8 @@ def apply_text_overlay(
             "preset": str(request.preset or "luxury_serif")[:40],
             "emoji_prefix": str(request.emoji_prefix or "")[:80],
             "emoji_suffix": str(request.emoji_suffix or "")[:80],
+            "emoji_prefix_pngs": prefix_pngs,
+            "emoji_suffix_pngs": suffix_pngs,
             "headline_color": str(request.headline_color or "white")[:30],
             "subheadline_color": str(request.subheadline_color or "white")[:30],
             "placement": str(request.placement or "middle")[:20],
@@ -200,6 +221,7 @@ def apply_text_overlay(
         "ok": True,
         "status": "queued",
         "caption": headline,
+        "emoji_mode": "browser_system_png" if any(prefix_pngs + suffix_pngs) else "fallback",
         "task_id": task.id,
     }
 
@@ -219,6 +241,7 @@ def video_provider_health():
         "fashion_text_overlay": True,
         "ffmpeg_text_mode": "manual_styled",
         "ffmpeg_color_emoji": True,
+        "ffmpeg_apple_emoji": "browser-rendered on Apple device",
     }
 
 
