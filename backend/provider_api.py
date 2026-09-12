@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import replace
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Response
@@ -13,13 +14,35 @@ from backend.flow_account_affinity import install_flow_account_affinity
 from backend.models import Batch, ProductJob
 from backend.schemas import UpdateVideoProviderRequest
 from backend.services import useapi
+from backend.shoe_o1 import install_shoe_o1_handlers, shoe_o1_images_ready, shoe_o1_video_prompt
 from backend.text_overlay import install_text_overlay_handler
-from backend.video_provider import provider_config
+from backend.video_provider import install_video_provider_handlers, provider_config
 
 
 router = APIRouter()
+
+# API-side task helpers mirror the worker install order. The worker is what executes queued
+# jobs, but keeping the same handler chain here makes prompt previews and enqueue behavior
+# consistent with production.
 install_flow_account_affinity()
+install_video_provider_handlers()
 install_text_overlay_handler()
+install_shoe_o1_handlers()
+
+# Shoe O1 can use the approved Flow opener + six product references. Keep the worker's
+# Flow image-reference cap unchanged; this API-only override lets a shoe job persist a
+# sixth product ref for Kling even though Frame A still uses the existing Flow ref limit.
+_original_api_settings = base_api.settings
+
+
+def _api_settings_with_o1_refs():
+    cfg = _original_api_settings()
+    return replace(cfg, max_product_refs=max(6, int(cfg.max_product_refs or 0)))
+
+
+base_api.settings = _api_settings_with_o1_refs
+base_api.shoe_showcase_video_prompt = shoe_o1_video_prompt
+base_api._editorial_images_ready = shoe_o1_images_ready
 
 
 # Never expose a provider/raw video as the final deliverable. A finished fashion video
@@ -56,6 +79,27 @@ def _job_out_with_download(job: ProductJob):
 base_api.job_out = _job_out_with_download
 
 
+def _provider_config(batch: Batch) -> dict:
+    if (batch.mode or "fashion_tryon") == "shoe_showcase":
+        return {
+            "batch_id": batch.id,
+            "batch_name": batch.name,
+            "mode": batch.mode or "shoe_showcase",
+            "video_provider": "kling",
+            "video_provider_label": "Kling O1",
+            "kling_account_email": batch.kling_account_email,
+            "kling_model": "kling-o1",
+            "kling_mode": "pro",
+            "kling_duration": 10,
+            "kling_audio": False,
+            "kling_multi_shot": False,
+            "aspect_ratio": "9:16 · approved Flow image @image_1 + up to 6 shoe refs",
+            "automatic_fallback": False,
+            "locked_for_shoes": True,
+        }
+    return provider_config(batch)
+
+
 @router.get("/jobs/{job_id}/download-video", dependencies=[Depends(require_api_key)])
 def download_final_video(job_id: str, db: Session = Depends(get_db)):
     job = db.get(ProductJob, job_id)
@@ -87,10 +131,12 @@ def video_provider_health():
     return {
         "ok": True,
         "providers": ["omni", "kling"],
-        "kling_model": "kling-v3-0",
-        "kling_duration": 8,
+        "fashion_kling_model": "kling-v3-0",
+        "fashion_kling_duration": 8,
+        "shoe_kling_model": "kling-o1",
+        "shoe_kling_duration": 10,
+        "shoe_reference_limit": 7,
         "kling_audio": False,
-        "kling_multi_shot": False,
         "automatic_fallback": False,
         "fashion_text_overlay": True,
     }
@@ -110,7 +156,7 @@ def get_batch_video_provider(batch_id: str, db: Session = Depends(get_db)):
     batch = db.get(Batch, batch_id)
     if not batch:
         raise HTTPException(404, "Batch not found")
-    return provider_config(batch)
+    return _provider_config(batch)
 
 
 @router.put("/batches/{batch_id}/video-provider", dependencies=[Depends(require_api_key)])
@@ -123,14 +169,26 @@ def update_batch_video_provider(
     if not batch:
         raise HTTPException(404, "Batch not found")
 
-    provider = useapi.normalize_video_provider(req.video_provider)
-    if (batch.mode or "fashion_tryon") == "shoe_showcase" and provider == "kling":
-        raise HTTPException(
-            400,
-            "Shoe Showcase uses its dedicated 3-clip Google Flow editorial pipeline. "
-            "Choose Kling 3.0 on a Fashion Try-On batch.",
-        )
+    if (batch.mode or "fashion_tryon") == "shoe_showcase":
+        # Shoe Showcase is intentionally locked to O1. Flow remains the still-image
+        # generator only; the approved opener then becomes @image_1 for Kling O1.
+        try:
+            account = useapi.resolve_kling_account_email(
+                req.kling_account_email or batch.kling_account_email or ""
+            )
+        except Exception as exc:
+            raise HTTPException(400, f"Kling O1 could not be selected: {exc}")
+        batch.video_provider = "kling"
+        batch.kling_account_email = account
+        batch.kling_model = "kling-o1"
+        batch.kling_mode = "pro"
+        batch.updated_at = datetime.now(timezone.utc)
+        db.add(batch)
+        db.commit()
+        db.refresh(batch)
+        return _provider_config(batch)
 
+    provider = useapi.normalize_video_provider(req.video_provider)
     if provider == "kling":
         try:
             account = useapi.resolve_kling_account_email(
@@ -150,7 +208,7 @@ def update_batch_video_provider(
     db.add(batch)
     db.commit()
     db.refresh(batch)
-    return provider_config(batch)
+    return _provider_config(batch)
 
 
 app.include_router(router)
