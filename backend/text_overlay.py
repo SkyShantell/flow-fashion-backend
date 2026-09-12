@@ -11,6 +11,7 @@ from typing import Callable
 
 from sqlalchemy.orm import Session
 
+from backend import hook_index_from_motion_style
 from backend.models import Batch, ProductJob, QueueTask
 from backend.services import useapi
 import backend.tasks as tasks
@@ -22,10 +23,6 @@ _ORIGINAL_ARCHIVE_MEDIA: Callable[[Session, QueueTask], None] | None = None
 _ORIGINAL_ENQUEUE_TASK: Callable[..., QueueTask] | None = None
 _ORIGINAL_SUBMIT_VIDEO_HANDLER: Callable[[Session, QueueTask], None] | None = None
 _ORIGINAL_VIDEO_PROMPT: Callable[..., str] | None = None
-_ORIGINAL_API_DEFAULT_VIDEO_PROMPT: Callable[..., str] | None = None
-_ORIGINAL_API_LAST_VIDEO_PROMPT: Callable[..., tuple[str, str]] | None = None
-_HOOK_PREFIX = "ON-SCREEN HOOK (EDIT THIS LINE):"
-_HOOK_RE = re.compile(r"^\s*ON-SCREEN\s+HOOK(?:\s*\(EDIT THIS LINE\))?\s*:\s*(.*?)\s*$", re.IGNORECASE)
 _FONT_FILES = (
     "/usr/local/share/fonts/TikTokSans.ttf",
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
@@ -39,97 +36,137 @@ def _font_file() -> str:
     return _FONT_FILES[-1]
 
 
-def _fashion_caption(job: ProductJob) -> str:
-    """Build the default TikTok-style fashion callout from product metadata."""
+def _normalized_product_name(job: ProductJob) -> str:
     raw = str(job.product_name or "").strip().lower()
     raw = re.sub(r"\([^)]*\)|\[[^]]*\]", " ", raw)
     raw = re.sub(r"[_|/]+", " ", raw)
     raw = re.sub(r"[^a-z0-9' -]+", " ", raw)
-    raw = re.sub(r"\s+", " ", raw).strip()
+    return re.sub(r"\s+", " ", raw).strip()
 
-    colors = ["faded black", "black", "white", "cream", "navy", "blue", "pink", "brown", "grey", "gray", "green", "red"]
-    details = [
-        "low rise", "high rise", "mid rise", "baggy", "wide leg", "straight leg",
-        "drop shoulder", "striped", "cropped", "oversized", "sleeveless", "cable knit",
-    ]
-    found_color = next((x for x in colors if x in raw), "")
-    found_details = [x for x in details if x in raw][:2]
-    descriptor = " ".join(([found_color] if found_color else []) + found_details).strip()
+
+def _fashion_hook_profile(job: ProductJob) -> tuple[str, str]:
+    """Return a simple product category plus the strongest default hook."""
+    raw = _normalized_product_name(job)
+    focus = str(job.focus or "").strip().lower()
 
     if "jean" in raw:
-        return f"the perfect {descriptor + ' ' if descriptor else ''}jeans".strip()
-    if "sweater" in raw:
-        return f"the perfect {descriptor + ' ' if descriptor else ''}sweater".strip()
+        return "pants", "the perfect jeans"
     if "polo" in raw and ("knit" in raw or "sweater" in raw):
-        return "polo knitwear >>>"
+        return "top", "polo knitwear >>>"
     if "knit" in raw:
         prefix = "sleeveless " if "sleeveless" in raw else ""
-        return f"{prefix}knitwear >>>"
+        return "top", f"{prefix}knitwear >>>"
+    if "sweater" in raw:
+        return "top", "the perfect sweater"
     if "hoodie" in raw and any(x in raw for x in ("set", "pant", "jogger", "sweat")):
-        return "the perfect cozy set"
+        return "set", "the perfect cozy set"
     if "set" in raw:
-        return "the perfect set for fall"
+        return "set", "the perfect set for fall"
     if "hoodie" in raw:
-        return "hoodie season >>>"
+        return "top", "hoodie season >>>"
     if "dress" in raw:
-        return "the perfect everyday dress"
-    if any(x in raw for x in ("pants", "trouser", "cargo")):
-        return "the perfect everyday pants"
-    if any(x in raw for x in ("shirt", "tee", "top", "blouse")):
-        return "the perfect everyday top"
-    if any(x in raw for x in ("shoe", "sneaker", "boot", "heel", "loafer")) or str(job.focus or "") == "shoes":
-        return "the perfect pair >>>"
-    if any(x in raw for x in ("bag", "purse", "handbag")) or str(job.focus or "") == "handbag":
-        return "the perfect everyday bag"
-
-    stop = {"women", "womens", "women's", "men", "mens", "men's", "fashion", "casual", "new", "style", "2026"}
-    words = [w for w in raw.split() if w not in stop][:5]
-    short_name = " ".join(words).strip()
-    return f"the perfect {short_name}".strip() if short_name else "the perfect fit >>>"
+        return "dress", "the perfect everyday dress"
+    if any(x in raw for x in ("pants", "trouser", "cargo")) or focus == "pants":
+        return "pants", "the perfect everyday pants"
+    if any(x in raw for x in ("shirt", "tee", "top", "blouse")) or focus in {"shirt", "hoodie"}:
+        return "top", "the perfect everyday top"
+    if any(x in raw for x in ("shoe", "sneaker", "boot", "heel", "loafer")) or focus == "shoes":
+        return "shoes", "the perfect pair >>>"
+    if any(x in raw for x in ("bag", "purse", "handbag")) or focus == "handbag":
+        return "bag", "the perfect everyday bag"
+    return "outfit", "the perfect fit >>>"
 
 
-def _clean_hook(value: str) -> str:
-    return re.sub(r"\s+", " ", str(value or "").strip())[:90]
+def _fashion_hook_options(job: ProductJob) -> list[str]:
+    """Five concise hook choices mirrored by the product-photo page control."""
+    category, primary = _fashion_hook_profile(job)
+    options_by_category = {
+        "pants": [
+            primary,
+            "these fit way too good >>>",
+            "found my new favorite pants",
+            "the fit on these >>>",
+            "need these in every color",
+        ],
+        "top": [
+            primary,
+            "this top is too good >>>",
+            "found my new favorite top",
+            "the fit on this >>>",
+            "need this in every color",
+        ],
+        "set": [
+            primary,
+            "this set is too good >>>",
+            "the easiest outfit ever",
+            "found my new favorite set",
+            "need this in every color",
+        ],
+        "dress": [
+            primary,
+            "this dress is too good >>>",
+            "found my new favorite dress",
+            "the fit on this >>>",
+            "need this in every color",
+        ],
+        "shoes": [
+            primary,
+            "these look even better on >>>",
+            "found my new favorite pair",
+            "the shape on these >>>",
+            "need these in every color",
+        ],
+        "bag": [
+            primary,
+            "this bag goes with everything",
+            "found my new everyday bag",
+            "the details on this >>>",
+            "need this in every color",
+        ],
+        "outfit": [
+            primary,
+            "this fit is too good >>>",
+            "found my new favorite outfit",
+            "the fit on this >>>",
+            "need this in every color",
+        ],
+    }
+    values = options_by_category.get(category, options_by_category["outfit"])
+    out: list[str] = []
+    for value in values:
+        cleaned = re.sub(r"\s+", " ", str(value or "").strip()).lower()
+        if cleaned and cleaned not in out:
+            out.append(cleaned)
+    fillers = ["this one is too good >>>", "adding this to the rotation", "the details on this >>>"]
+    for value in fillers:
+        if len(out) >= 5:
+            break
+        if value not in out:
+            out.append(value)
+    return out[:5]
 
 
-def _split_editor_prompt(value: str) -> tuple[str, str]:
-    """Separate the editable post-production hook line from the generation prompt."""
-    hook = ""
-    prompt_lines: list[str] = []
-    for line in str(value or "").splitlines():
-        match = _HOOK_RE.match(line)
-        if match:
-            hook = _clean_hook(match.group(1))
-            continue
-        if line.strip().upper() == "VIDEO GENERATION PROMPT:":
-            continue
-        prompt_lines.append(line)
-    return "\n".join(prompt_lines).strip(), hook
-
-
-def _editor_prompt(prompt: str, hook: str) -> str:
-    generation_prompt, embedded_hook = _split_editor_prompt(prompt)
-    resolved_hook = _clean_hook(embedded_hook or hook) or "the perfect fit >>>"
-    return f"{_HOOK_PREFIX} {resolved_hook}\n\nVIDEO GENERATION PROMPT:\n{generation_prompt}"
+def _fashion_caption(job: ProductJob) -> str:
+    options = _fashion_hook_options(job)
+    index = hook_index_from_motion_style(job.motion_style_override)
+    return options[max(0, min(4, index - 1))] if options else "the perfect fit >>>"
 
 
 def _sanitize_male_video_prompt(prompt: str) -> str:
-    """Remove male hands-on-hips poses from both saved and newly generated prompts."""
+    """Remove every male hands-on-hips instruction from generated or edited prompts."""
     text = str(prompt or "")
-    text = re.sub(
-        r"free hand on hip and a small confident double nod",
-        "free hand relaxed naturally at the side or briefly in a pocket, with a small confident double nod",
-        text,
-        flags=re.IGNORECASE,
+    replacements = (
+        (r"free hand on hip and a small confident double nod", "free hand relaxed naturally at the side or briefly in a pocket, with a small confident double nod"),
+        (r"lower the hand toward the hip", "lower the hand naturally to the side"),
+        (r"\bfree hand on (?:the )?hip\b", "free hand relaxed naturally at the side"),
+        (r"\bhand on (?:the )?hip\b", "hand relaxed naturally at the side"),
+        (r"\bhands on hips\b", "hands relaxed naturally away from the hips"),
+        (r"\bhands-on-hips\b", "relaxed natural stance"),
     )
-    text = re.sub(
-        r"lower the hand toward the hip",
-        "lower the hand naturally to the side",
-        text,
-        flags=re.IGNORECASE,
-    )
+    for pattern, replacement in replacements:
+        text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
     guard = (
-        "MALE POSE RULE: never place the free hand on the hip and never use a hands-on-hips pose. "
+        "MALE POSE RULE: never place either hand on the hips and never use a hands-on-hips pose. "
         "Keep the free hand relaxed at the side, briefly in a pocket, or naturally interacting with the garment instead."
     )
     if guard.lower() not in text.lower():
@@ -146,24 +183,8 @@ def _guarded_video_prompt(job, *, creator_profile: str = "Male", video_style: st
     return prompt
 
 
-def _latest_submit_video_task(db: Session, job: ProductJob) -> QueueTask | None:
-    return (
-        db.query(QueueTask)
-        .filter(QueueTask.job_id == job.id, QueueTask.task_type == "submit_video")
-        .order_by(QueueTask.created_at.desc())
-        .first()
-    )
-
-
-def _caption_for_job(db: Session, job: ProductJob) -> str:
-    submit = _latest_submit_video_task(db, job)
-    payload = dict(submit.payload or {}) if submit else {}
-    custom = _clean_hook(str(payload.get("onscreen_hook") or ""))
-    return custom or _fashion_caption(job)
-
-
 def _run_submit_with_prompt_controls(db: Session, task: QueueTask) -> None:
-    """Strip editor-only hook metadata before Flow/Kling and enforce male pose rules."""
+    """Keep the video prompt about motion only while enforcing the male pose rule."""
     if _ORIGINAL_SUBMIT_VIDEO_HANDLER is None:
         raise RuntimeError("Video submit handler is unavailable.")
 
@@ -172,61 +193,13 @@ def _run_submit_with_prompt_controls(db: Session, task: QueueTask) -> None:
     payload = dict(task.payload or {})
     override = str(payload.get("prompt_override") or "").strip()
 
-    if override:
-        generation_prompt, hook = _split_editor_prompt(override)
-        if hook:
-            payload["onscreen_hook"] = hook
-        if batch and str(batch.creator_profile or "Male").lower().startswith("m"):
-            generation_prompt = _sanitize_male_video_prompt(generation_prompt)
-        payload["prompt_override"] = generation_prompt
+    if override and batch and str(batch.creator_profile or "Male").lower().startswith("m"):
+        payload["prompt_override"] = _sanitize_male_video_prompt(override)
         task.payload = payload
         db.add(task)
         db.flush()
 
     return _ORIGINAL_SUBMIT_VIDEO_HANDLER(db, task)
-
-
-def _patch_api_prompt_editor() -> None:
-    """Reuse the existing Video prompt modal as the hook editor without a dashboard migration."""
-    global _ORIGINAL_API_DEFAULT_VIDEO_PROMPT, _ORIGINAL_API_LAST_VIDEO_PROMPT
-    api_module = sys.modules.get("backend.api")
-    if api_module is None:
-        return
-
-    default_builder = getattr(api_module, "_default_video_prompt", None)
-    last_builder = getattr(api_module, "_last_video_prompt", None)
-    if not callable(default_builder) or not callable(last_builder):
-        return
-    if _ORIGINAL_API_DEFAULT_VIDEO_PROMPT is not None:
-        return
-
-    _ORIGINAL_API_DEFAULT_VIDEO_PROMPT = default_builder
-    _ORIGINAL_API_LAST_VIDEO_PROMPT = last_builder
-
-    def default_with_hook(job: ProductJob, db: Session) -> str:
-        if _ORIGINAL_API_DEFAULT_VIDEO_PROMPT is None:
-            raise RuntimeError("Default video prompt builder is unavailable.")
-        prompt = _ORIGINAL_API_DEFAULT_VIDEO_PROMPT(job, db)
-        batch = db.get(Batch, job.batch_id)
-        if batch and str(batch.creator_profile or "Male").lower().startswith("m"):
-            prompt = _sanitize_male_video_prompt(prompt)
-        return _editor_prompt(prompt, _fashion_caption(job))
-
-    def last_with_hook(job: ProductJob, db: Session) -> tuple[str, str]:
-        if _ORIGINAL_API_LAST_VIDEO_PROMPT is None:
-            raise RuntimeError("Last video prompt builder is unavailable.")
-        prompt, source = _ORIGINAL_API_LAST_VIDEO_PROMPT(job, db)
-        generation_prompt, embedded_hook = _split_editor_prompt(prompt)
-        submit = _latest_submit_video_task(db, job)
-        payload = dict(submit.payload or {}) if submit else {}
-        hook = _clean_hook(str(payload.get("onscreen_hook") or "")) or embedded_hook or _fashion_caption(job)
-        batch = db.get(Batch, job.batch_id)
-        if batch and str(batch.creator_profile or "Male").lower().startswith("m"):
-            generation_prompt = _sanitize_male_video_prompt(generation_prompt)
-        return _editor_prompt(generation_prompt, hook), source
-
-    api_module._default_video_prompt = default_with_hook
-    api_module._last_video_prompt = last_with_hook
 
 
 def _wrap_caption(text: str) -> str:
@@ -246,8 +219,6 @@ def _burn_text(video_bytes: bytes, caption: str, placement_seed: str) -> bytes:
     if not video_bytes:
         raise RuntimeError("No final video bytes were available for the text overlay.")
 
-    # Keep every caption near the visual center of the frame, while retaining a little
-    # horizontal/vertical variation so consecutive videos do not look templated.
     placements = [
         ("(w-text_w)/2", "h*0.50"),
         ("w*0.055", "h*0.46"),
@@ -295,8 +266,6 @@ def _enqueue_with_text_finalizing(db: Session, task_type: str, **kwargs) -> Queu
         if job_id:
             job = db.get(ProductJob, job_id)
             if job and job.stage == "video_complete":
-                # Keep a recoverable raw source for FFmpeg, but do not expose it as the
-                # final video while the text-burn step is still processing.
                 if job.video_url and not job.video_source_url:
                     job.video_source_url = job.video_url
                 job.video_url = None
@@ -316,8 +285,6 @@ def _run_archive_with_text_overlay(db: Session, task: QueueTask) -> None:
     batch = db.get(Batch, job.batch_id) if job else None
     payload = dict(task.payload or {})
 
-    # Text overlay is a required finalization step. The raw provider/upscale video is
-    # intentionally hidden from the UI until this block completes.
     if (
         job
         and batch
@@ -325,7 +292,7 @@ def _run_archive_with_text_overlay(db: Session, task: QueueTask) -> None:
         and not payload.get("fashion_text_overlay_applied")
         and (job.video_media_id or job.video_url or job.video_source_media_id or job.video_source_url)
     ):
-        caption = _caption_for_job(db, job)
+        caption = _fashion_caption(job)
         log.info("Applying fashion text overlay · job=%s · caption=%s", job.id, caption)
         original_bytes = tasks._download_final_video_for_archive(job)
         if not original_bytes:
@@ -342,8 +309,6 @@ def _run_archive_with_text_overlay(db: Session, task: QueueTask) -> None:
         job.video_error = None
         job.stage = "video_complete"
 
-        # Any previous Drive video points at an older/raw render. Clear only the video
-        # archive references so the normal archive handler stores the text-burned MP4.
         job.drive_video_id = None
         job.drive_video_url = None
         job.drive_video_download_url = None
@@ -362,7 +327,7 @@ def _run_archive_with_text_overlay(db: Session, task: QueueTask) -> None:
 
 
 def install_text_overlay_handler() -> None:
-    """Install final text rendering, editable hooks, and male pose safeguards."""
+    """Install final text rendering and male pose safeguards."""
     global _INSTALLED, _ORIGINAL_ARCHIVE_MEDIA, _ORIGINAL_ENQUEUE_TASK
     global _ORIGINAL_SUBMIT_VIDEO_HANDLER, _ORIGINAL_VIDEO_PROMPT
     if _INSTALLED:
@@ -380,15 +345,10 @@ def install_text_overlay_handler() -> None:
     _ORIGINAL_ENQUEUE_TASK = tasks.enqueue_task
     _ORIGINAL_VIDEO_PROMPT = tasks.video_prompt
 
-    # Worker-side defaults: both Flow and Kling get the male no-hands-on-hips safeguard.
     tasks.video_prompt = _guarded_video_prompt
     video_provider_module = sys.modules.get("backend.video_provider")
     if video_provider_module is not None and hasattr(video_provider_module, "video_prompt"):
         video_provider_module.video_prompt = _guarded_video_prompt
-
-    # API-side prompt editor: the existing modal now exposes the editable FFmpeg hook
-    # as its first line, so no dashboard redeploy is required for this control.
-    _patch_api_prompt_editor()
 
     tasks.enqueue_task = _enqueue_with_text_finalizing
     tasks.HANDLERS["submit_video"] = _run_submit_with_prompt_controls
