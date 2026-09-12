@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import re
 import subprocess
+import sys
 import tempfile
 import textwrap
 from pathlib import Path
@@ -19,6 +20,12 @@ log = logging.getLogger("flow-text-overlay")
 _INSTALLED = False
 _ORIGINAL_ARCHIVE_MEDIA: Callable[[Session, QueueTask], None] | None = None
 _ORIGINAL_ENQUEUE_TASK: Callable[..., QueueTask] | None = None
+_ORIGINAL_SUBMIT_VIDEO_HANDLER: Callable[[Session, QueueTask], None] | None = None
+_ORIGINAL_VIDEO_PROMPT: Callable[..., str] | None = None
+_ORIGINAL_API_DEFAULT_VIDEO_PROMPT: Callable[..., str] | None = None
+_ORIGINAL_API_LAST_VIDEO_PROMPT: Callable[..., tuple[str, str]] | None = None
+_HOOK_PREFIX = "ON-SCREEN HOOK (EDIT THIS LINE):"
+_HOOK_RE = re.compile(r"^\s*ON-SCREEN\s+HOOK(?:\s*\(EDIT THIS LINE\))?\s*:\s*(.*?)\s*$", re.IGNORECASE)
 _FONT_FILES = (
     "/usr/local/share/fonts/TikTokSans.ttf",
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
@@ -33,7 +40,7 @@ def _font_file() -> str:
 
 
 def _fashion_caption(job: ProductJob) -> str:
-    """Build a short TikTok-style fashion callout from the product metadata."""
+    """Build the default TikTok-style fashion callout from product metadata."""
     raw = str(job.product_name or "").strip().lower()
     raw = re.sub(r"\([^)]*\)|\[[^]]*\]", " ", raw)
     raw = re.sub(r"[_|/]+", " ", raw)
@@ -79,6 +86,147 @@ def _fashion_caption(job: ProductJob) -> str:
     words = [w for w in raw.split() if w not in stop][:5]
     short_name = " ".join(words).strip()
     return f"the perfect {short_name}".strip() if short_name else "the perfect fit >>>"
+
+
+def _clean_hook(value: str) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip())[:90]
+
+
+def _split_editor_prompt(value: str) -> tuple[str, str]:
+    """Separate the editable post-production hook line from the generation prompt."""
+    hook = ""
+    prompt_lines: list[str] = []
+    for line in str(value or "").splitlines():
+        match = _HOOK_RE.match(line)
+        if match:
+            hook = _clean_hook(match.group(1))
+            continue
+        if line.strip().upper() == "VIDEO GENERATION PROMPT:":
+            continue
+        prompt_lines.append(line)
+    return "\n".join(prompt_lines).strip(), hook
+
+
+def _editor_prompt(prompt: str, hook: str) -> str:
+    generation_prompt, embedded_hook = _split_editor_prompt(prompt)
+    resolved_hook = _clean_hook(embedded_hook or hook) or "the perfect fit >>>"
+    return f"{_HOOK_PREFIX} {resolved_hook}\n\nVIDEO GENERATION PROMPT:\n{generation_prompt}"
+
+
+def _sanitize_male_video_prompt(prompt: str) -> str:
+    """Remove male hands-on-hips poses from both saved and newly generated prompts."""
+    text = str(prompt or "")
+    text = re.sub(
+        r"free hand on hip and a small confident double nod",
+        "free hand relaxed naturally at the side or briefly in a pocket, with a small confident double nod",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        r"lower the hand toward the hip",
+        "lower the hand naturally to the side",
+        text,
+        flags=re.IGNORECASE,
+    )
+    guard = (
+        "MALE POSE RULE: never place the free hand on the hip and never use a hands-on-hips pose. "
+        "Keep the free hand relaxed at the side, briefly in a pocket, or naturally interacting with the garment instead."
+    )
+    if guard.lower() not in text.lower():
+        text = f"{text.rstrip()} {guard}"
+    return text.strip()
+
+
+def _guarded_video_prompt(job, *, creator_profile: str = "Male", video_style: str = "Academy — Boss / Calm") -> str:
+    if _ORIGINAL_VIDEO_PROMPT is None:
+        raise RuntimeError("Original video prompt builder is unavailable.")
+    prompt = _ORIGINAL_VIDEO_PROMPT(job, creator_profile=creator_profile, video_style=video_style)
+    if str(creator_profile or "Male").lower().startswith("m"):
+        prompt = _sanitize_male_video_prompt(prompt)
+    return prompt
+
+
+def _latest_submit_video_task(db: Session, job: ProductJob) -> QueueTask | None:
+    return (
+        db.query(QueueTask)
+        .filter(QueueTask.job_id == job.id, QueueTask.task_type == "submit_video")
+        .order_by(QueueTask.created_at.desc())
+        .first()
+    )
+
+
+def _caption_for_job(db: Session, job: ProductJob) -> str:
+    submit = _latest_submit_video_task(db, job)
+    payload = dict(submit.payload or {}) if submit else {}
+    custom = _clean_hook(str(payload.get("onscreen_hook") or ""))
+    return custom or _fashion_caption(job)
+
+
+def _run_submit_with_prompt_controls(db: Session, task: QueueTask) -> None:
+    """Strip editor-only hook metadata before Flow/Kling and enforce male pose rules."""
+    if _ORIGINAL_SUBMIT_VIDEO_HANDLER is None:
+        raise RuntimeError("Video submit handler is unavailable.")
+
+    job = db.get(ProductJob, task.job_id) if task.job_id else None
+    batch = db.get(Batch, job.batch_id) if job else None
+    payload = dict(task.payload or {})
+    override = str(payload.get("prompt_override") or "").strip()
+
+    if override:
+        generation_prompt, hook = _split_editor_prompt(override)
+        if hook:
+            payload["onscreen_hook"] = hook
+        if batch and str(batch.creator_profile or "Male").lower().startswith("m"):
+            generation_prompt = _sanitize_male_video_prompt(generation_prompt)
+        payload["prompt_override"] = generation_prompt
+        task.payload = payload
+        db.add(task)
+        db.flush()
+
+    return _ORIGINAL_SUBMIT_VIDEO_HANDLER(db, task)
+
+
+def _patch_api_prompt_editor() -> None:
+    """Reuse the existing Video prompt modal as the hook editor without a dashboard migration."""
+    global _ORIGINAL_API_DEFAULT_VIDEO_PROMPT, _ORIGINAL_API_LAST_VIDEO_PROMPT
+    api_module = sys.modules.get("backend.api")
+    if api_module is None:
+        return
+
+    default_builder = getattr(api_module, "_default_video_prompt", None)
+    last_builder = getattr(api_module, "_last_video_prompt", None)
+    if not callable(default_builder) or not callable(last_builder):
+        return
+    if _ORIGINAL_API_DEFAULT_VIDEO_PROMPT is not None:
+        return
+
+    _ORIGINAL_API_DEFAULT_VIDEO_PROMPT = default_builder
+    _ORIGINAL_API_LAST_VIDEO_PROMPT = last_builder
+
+    def default_with_hook(job: ProductJob, db: Session) -> str:
+        if _ORIGINAL_API_DEFAULT_VIDEO_PROMPT is None:
+            raise RuntimeError("Default video prompt builder is unavailable.")
+        prompt = _ORIGINAL_API_DEFAULT_VIDEO_PROMPT(job, db)
+        batch = db.get(Batch, job.batch_id)
+        if batch and str(batch.creator_profile or "Male").lower().startswith("m"):
+            prompt = _sanitize_male_video_prompt(prompt)
+        return _editor_prompt(prompt, _fashion_caption(job))
+
+    def last_with_hook(job: ProductJob, db: Session) -> tuple[str, str]:
+        if _ORIGINAL_API_LAST_VIDEO_PROMPT is None:
+            raise RuntimeError("Last video prompt builder is unavailable.")
+        prompt, source = _ORIGINAL_API_LAST_VIDEO_PROMPT(job, db)
+        generation_prompt, embedded_hook = _split_editor_prompt(prompt)
+        submit = _latest_submit_video_task(db, job)
+        payload = dict(submit.payload or {}) if submit else {}
+        hook = _clean_hook(str(payload.get("onscreen_hook") or "")) or embedded_hook or _fashion_caption(job)
+        batch = db.get(Batch, job.batch_id)
+        if batch and str(batch.creator_profile or "Male").lower().startswith("m"):
+            generation_prompt = _sanitize_male_video_prompt(generation_prompt)
+        return _editor_prompt(generation_prompt, hook), source
+
+    api_module._default_video_prompt = default_with_hook
+    api_module._last_video_prompt = last_with_hook
 
 
 def _wrap_caption(text: str) -> str:
@@ -177,7 +325,7 @@ def _run_archive_with_text_overlay(db: Session, task: QueueTask) -> None:
         and not payload.get("fashion_text_overlay_applied")
         and (job.video_media_id or job.video_url or job.video_source_media_id or job.video_source_url)
     ):
-        caption = _fashion_caption(job)
+        caption = _caption_for_job(db, job)
         log.info("Applying fashion text overlay · job=%s · caption=%s", job.id, caption)
         original_bytes = tasks._download_final_video_for_archive(job)
         if not original_bytes:
@@ -214,15 +362,35 @@ def _run_archive_with_text_overlay(db: Session, task: QueueTask) -> None:
 
 
 def install_text_overlay_handler() -> None:
-    """Burn TikTok-style fashion text onto the final video before it can be exposed."""
+    """Install final text rendering, editable hooks, and male pose safeguards."""
     global _INSTALLED, _ORIGINAL_ARCHIVE_MEDIA, _ORIGINAL_ENQUEUE_TASK
+    global _ORIGINAL_SUBMIT_VIDEO_HANDLER, _ORIGINAL_VIDEO_PROMPT
     if _INSTALLED:
         return
-    original = tasks.HANDLERS.get("archive_media")
-    if original is None:
+
+    archive_handler = tasks.HANDLERS.get("archive_media")
+    submit_handler = tasks.HANDLERS.get("submit_video")
+    if archive_handler is None:
         raise RuntimeError("Existing archive handler could not be located.")
-    _ORIGINAL_ARCHIVE_MEDIA = original
+    if submit_handler is None:
+        raise RuntimeError("Existing video submit handler could not be located.")
+
+    _ORIGINAL_ARCHIVE_MEDIA = archive_handler
+    _ORIGINAL_SUBMIT_VIDEO_HANDLER = submit_handler
     _ORIGINAL_ENQUEUE_TASK = tasks.enqueue_task
+    _ORIGINAL_VIDEO_PROMPT = tasks.video_prompt
+
+    # Worker-side defaults: both Flow and Kling get the male no-hands-on-hips safeguard.
+    tasks.video_prompt = _guarded_video_prompt
+    video_provider_module = sys.modules.get("backend.video_provider")
+    if video_provider_module is not None and hasattr(video_provider_module, "video_prompt"):
+        video_provider_module.video_prompt = _guarded_video_prompt
+
+    # API-side prompt editor: the existing modal now exposes the editable FFmpeg hook
+    # as its first line, so no dashboard redeploy is required for this control.
+    _patch_api_prompt_editor()
+
     tasks.enqueue_task = _enqueue_with_text_finalizing
+    tasks.HANDLERS["submit_video"] = _run_submit_with_prompt_controls
     tasks.HANDLERS["archive_media"] = _run_archive_with_text_overlay
     _INSTALLED = True
