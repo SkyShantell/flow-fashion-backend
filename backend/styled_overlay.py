@@ -354,14 +354,17 @@ def render_styled_overlay(
 
         canvas.save(overlay_path, "PNG")
 
+        # These generated videos are intentionally silent. Overlaying text requires a video
+        # re-encode, but there is no reason to probe/map/encode an audio stream that does not
+        # exist. `superfast` materially reduces CPU render time while keeping the 1080p frame.
         cmd = [
             "ffmpeg", "-y",
             "-i", str(input_path),
             "-loop", "1", "-i", str(overlay_path),
             "-filter_complex", "[0:v][1:v]overlay=0:0:format=auto[v]",
-            "-map", "[v]", "-map", "0:a?",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
-            "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
+            "-map", "[v]",
+            "-c:v", "libx264", "-preset", "superfast", "-crf", "19",
+            "-pix_fmt", "yuv420p", "-an",
             "-movflags", "+faststart", "-shortest", str(output_path),
         ]
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
