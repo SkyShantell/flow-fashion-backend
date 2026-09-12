@@ -29,6 +29,7 @@ class Settings:
 
     # useapi / Flow
     flow_base: str = os.getenv("FLOW_BASE", "https://api.useapi.net/v1/google-flow").strip().rstrip("/")
+    kling_base: str = os.getenv("KLING_BASE", "https://api.useapi.net/v1/kling").strip().rstrip("/")
     image_model: str = os.getenv("IMAGE_MODEL", "nano-banana-pro").strip()
     video_model: str = os.getenv("VIDEO_MODEL", "omni-flash").strip()
     video_duration: int = _int_env("VIDEO_DURATION", 8)
