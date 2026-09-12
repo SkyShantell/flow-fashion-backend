@@ -36,9 +36,6 @@ def parse_error(resp: requests.Response) -> str:
     if isinstance(err, dict):
         err = err.get("message") or err.get("error") or str(err)
 
-    # useapi sometimes puts the useful Google/Flow failure details in nested
-    # response/operations/media fields while the top-level error is only
-    # "API error: 400". Include those fields so Railway logs reveal the cause.
     diagnostic = {}
     for key in ("code", "response", "operations", "media", "status", "jobId", "jobid"):
         if key in payload and payload.get(key) not in (None, "", [], {}):
@@ -89,11 +86,256 @@ def normalize_account_email(value: str | None) -> str:
     return str(value or "").strip()
 
 
+KLING_MODELS = {
+    "kling-v3-0",
+    "kling-v3-0-turbo",
+    "kling-v2-6",
+    "kling-v2-5",
+    "kling-v2-1",
+    "kling-v2-1-master",
+    "kling-v1-6",
+    "kling-v1-5",
+}
+KLING_MODES = {"std", "pro", "4k"}
+KLING_FINAL_FAILURES = {6, 7, 9, 50, 53, 54, 58}
+
+
+def normalize_video_provider(value: str | None) -> str:
+    return "kling" if str(value or "").strip().lower() == "kling" else "omni"
+
+
+def normalize_kling_model(value: str | None) -> str:
+    model = str(value or "kling-v3-0").strip().lower()
+    return model if model in KLING_MODELS else "kling-v3-0"
+
+
+def normalize_kling_mode(value: str | None, model: str | None = None) -> str:
+    resolved_model = normalize_kling_model(model)
+    mode = str(value or "pro").strip().lower()
+    if mode not in KLING_MODES:
+        mode = "pro"
+    if resolved_model == "kling-v2-1-master":
+        return "pro"
+    if resolved_model != "kling-v3-0" and mode == "4k":
+        return "pro"
+    if resolved_model == "kling-v3-0-turbo" and mode == "4k":
+        return "pro"
+    return mode
+
+
+def _kling_accounts_payload() -> dict:
+    cfg = settings()
+    if not cfg.useapi_token:
+        raise RuntimeError("Missing USEAPI_TOKEN")
+    payload = request_json(
+        "GET", f"{cfg.kling_base}/accounts", headers=flow_headers(cfg.useapi_token), timeout=60, retries=1
+    )
+    if not isinstance(payload, dict):
+        return {}
+    return payload
+
+
+def list_kling_accounts() -> list[dict]:
+    """Return non-secret Kling account metadata configured in UseAPI."""
+    payload = _kling_accounts_payload()
+    out: list[dict] = []
+    for key, value in payload.items():
+        if not isinstance(value, dict):
+            continue
+        email = str(value.get("email") or key or "").strip()
+        if not email:
+            continue
+        session = value.get("session") if isinstance(value.get("session"), dict) else {}
+        out.append({
+            "email": email,
+            "auth_mode": str(value.get("authMode") or ""),
+            "max_jobs": value.get("maxJobs"),
+            "session_expiry": session.get("ExpireTimeUTC") or session.get("ExpireTime"),
+        })
+    return out
+
+
+def resolve_kling_account_email(preferred: str | None = None) -> str:
+    """Return a concrete Kling account. This avoids UseAPI's multi-account email requirement."""
+    requested = normalize_account_email(preferred)
+    accounts = list_kling_accounts()
+    emails = [str(x.get("email") or "").strip() for x in accounts if x.get("email")]
+    if requested:
+        if emails and requested.lower() not in {x.lower() for x in emails}:
+            raise RuntimeError(f"Kling account {requested} is not configured in UseAPI.")
+        return requested
+    if not emails:
+        raise RuntimeError("No Kling account is configured in UseAPI.")
+    return emails[0]
+
+
+def upload_kling_asset(image_bytes: bytes, mime: str = "image/jpeg", email: str = "") -> dict:
+    cfg = settings()
+    if not cfg.useapi_token:
+        raise RuntimeError("Missing USEAPI_TOKEN")
+    image_bytes, mime = normalize_image_bytes(image_bytes, mime)
+    account = resolve_kling_account_email(email)
+    resp = requests.post(
+        f"{cfg.kling_base}/assets/",
+        params={"email": account},
+        headers={**flow_headers(cfg.useapi_token), "Content-Type": mime},
+        data=image_bytes,
+        timeout=180,
+    )
+    if resp.status_code >= 400:
+        raise RuntimeError(f"Kling asset upload failed — HTTP {resp.status_code}: {parse_error(resp)}")
+    payload = resp.json() if resp.content else {}
+    url = str(payload.get("url") or payload.get("resourceUrl") or "").strip()
+    if not url:
+        raise RuntimeError("Kling uploaded the image but returned no asset URL.")
+    return {
+        "url": url,
+        "file_name": str(payload.get("fileName") or ""),
+        "email": account,
+        "status": payload.get("status"),
+    }
+
+
+def _normalize_kling_duration(duration: int | None, model: str) -> str:
+    value = int(duration or 5)
+    if model in {"kling-v3-0", "kling-v3-0-turbo"}:
+        return str(max(3, min(15, value)))
+    return "10" if value >= 8 else "5"
+
+
+def submit_kling_video(
+    image_url: str,
+    prompt: str,
+    *,
+    email: str = "",
+    duration: int | None = None,
+    model: str = "kling-v3-0",
+    mode: str = "pro",
+) -> dict:
+    cfg = settings()
+    account = resolve_kling_account_email(email)
+    resolved_model = normalize_kling_model(model)
+    resolved_mode = normalize_kling_mode(mode, resolved_model)
+    body = {
+        "email": account,
+        "image": str(image_url),
+        "prompt": str(prompt or "")[:2500],
+        "duration": _normalize_kling_duration(duration, resolved_model),
+        "model_name": resolved_model,
+        "mode": resolved_mode,
+    }
+    if resolved_model == "kling-v3-0":
+        body["enable_audio"] = False
+    payload = request_json(
+        "POST",
+        f"{cfg.kling_base}/videos/image2video-frames",
+        headers=flow_headers(cfg.useapi_token, True),
+        json_body=body,
+        timeout=180,
+        retries=1,
+    )
+    task = payload.get("task") if isinstance(payload.get("task"), dict) else {}
+    task_id = task.get("id") or payload.get("task_id") or payload.get("id")
+    if not task_id:
+        raise RuntimeError("Kling submitted without returning a task ID.")
+    return {
+        "job_id": str(task_id),
+        "status": str(task.get("status_name") or payload.get("status_name") or "submitted").lower(),
+        "email": account,
+        "model": resolved_model,
+        "mode": resolved_mode,
+    }
+
+
+def get_kling_task(task_id: str, email: str = "") -> dict:
+    cfg = settings()
+    jid = str(task_id or "").strip()
+    if not jid:
+        raise RuntimeError("Missing Kling task ID.")
+    account = resolve_kling_account_email(email)
+    return request_json(
+        "GET",
+        f"{cfg.kling_base}/tasks/{quote(jid, safe='')}",
+        headers=flow_headers(cfg.useapi_token),
+        params={"email": account},
+        timeout=60,
+        retries=1,
+    )
+
+
+def parse_kling_task(payload: dict) -> dict:
+    payload = payload if isinstance(payload, dict) else {}
+    raw_status = payload.get("status")
+    task = payload.get("task") if isinstance(payload.get("task"), dict) else {}
+    if raw_status is None:
+        raw_status = task.get("status")
+    try:
+        code = int(raw_status)
+    except Exception:
+        code = -1
+    status_name = str(payload.get("status_name") or task.get("status_name") or "").lower()
+    final = bool(payload.get("status_final") if payload.get("status_final") is not None else task.get("status_final"))
+    result = {"status": "processing", "status_code": code, "status_name": status_name}
+    if code == 99 or status_name in {"succeed", "success", "completed"}:
+        result["status"] = "completed"
+    elif code in KLING_FINAL_FAILURES or (final and status_name in {"failed", "error"}):
+        result["status"] = "failed"
+        result["error"] = str(payload.get("error") or payload.get("message") or task.get("message") or f"Kling task failed ({code}).")
+        return result
+
+    works = payload.get("works") if isinstance(payload.get("works"), list) else []
+    for work in works:
+        if not isinstance(work, dict):
+            continue
+        if str(work.get("contentType") or "").lower() not in {"", "video"}:
+            continue
+        resource = work.get("resource") if isinstance(work.get("resource"), dict) else {}
+        cover = work.get("cover") if isinstance(work.get("cover"), dict) else {}
+        if work.get("workId") is not None:
+            result["work_id"] = str(work.get("workId"))
+        if resource.get("resource"):
+            result["video_url"] = str(resource.get("resource"))
+        if cover.get("resource"):
+            result["thumbnail_url"] = str(cover.get("resource"))
+        if result.get("work_id") or result.get("video_url"):
+            break
+    return result
+
+
+def get_kling_clean_url(work_id: str, email: str = "") -> str:
+    cfg = settings()
+    wid = str(work_id or "").strip()
+    if not wid:
+        return ""
+    account = resolve_kling_account_email(email)
+    last_error = None
+    for attempt in range(4):
+        try:
+            payload = request_json(
+                "GET",
+                f"{cfg.kling_base}/assets/download",
+                headers=flow_headers(cfg.useapi_token),
+                params={"email": account, "workIds": wid, "fileTypes": "MP4"},
+                timeout=90,
+                retries=0,
+            )
+            url = str(payload.get("cdnUrl") or "").strip()
+            if url:
+                return url
+            last_error = str(payload.get("error") or "Kling returned no clean download URL.")
+        except Exception as exc:
+            last_error = str(exc)
+        if attempt < 3:
+            time.sleep(3 + attempt * 2)
+    if last_error:
+        raise RuntimeError(last_error)
+    return ""
+
+
 def _account_summary(email: str, payload: dict | None) -> dict:
     payload = payload if isinstance(payload, dict) else {}
     credits_block = payload.get("credits") if isinstance(payload.get("credits"), dict) else {}
     session_block = payload.get("sessionData") if isinstance(payload.get("sessionData"), dict) else {}
-    # Some API responses nest the actual account under response/account/data.
     for key in ("account", "response", "data"):
         nested = payload.get(key)
         if isinstance(nested, dict) and (nested.get("health") is not None or nested.get("credits") is not None):
@@ -144,7 +386,6 @@ def list_flow_accounts() -> list[dict]:
     )
     emails: list[str] = []
     if isinstance(payload, dict):
-        # Documented shape is a map keyed by email. Also accept common wrapper/list shapes.
         candidate = payload.get("accounts")
         if isinstance(candidate, list):
             for item in candidate:
@@ -178,7 +419,6 @@ def list_flow_accounts() -> list[dict]:
             try:
                 results[email] = future.result()
             except Exception as exc:
-                # Keep the account visible even if one detail call temporarily fails.
                 results[email] = {
                     "email": email,
                     "health": "error",
@@ -328,7 +568,6 @@ def submit_upscale(media_generation_id: str, resolution: str | None = None) -> d
     payload = request_json("POST", f"{cfg.flow_base}/videos/upscale", headers=flow_headers(cfg.useapi_token, True), json_body=body, timeout=90, retries=1)
     job_id = payload.get("jobid") or payload.get("jobId")
     if not job_id:
-        # The endpoint can be synchronous if async is ignored, so also accept direct media.
         media_id, video_url, thumb = media_from_job_response(payload)
         if media_id or video_url:
             return {"job_id": "", "status": "completed", "media_id": media_id, "url": video_url, "thumbnail_url": thumb}
