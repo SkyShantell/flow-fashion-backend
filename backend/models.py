@@ -28,6 +28,21 @@ class SavedAvatar(Base):
     updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
+class EmojiAsset(Base):
+    """Reusable browser-rendered emoji artwork keyed by the exact Unicode sequence.
+
+    Apple emoji PNGs can be seeded from an Apple device once, then every VA/browser can
+    reuse the exact same transparent PNG without needing Apple's font on Railway or Windows.
+    """
+    __tablename__ = "emoji_assets"
+
+    token = Column(String(160), primary_key=True)
+    image_b64 = Column(Text, nullable=False)
+    source = Column(String(40), default="apple_browser")
+    created_at = Column(DateTime(timezone=True), default=utcnow)
+    updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
 class Batch(Base):
     __tablename__ = "batches"
 
