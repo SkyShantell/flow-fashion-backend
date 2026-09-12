@@ -6,6 +6,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends build-essential curl ffmpeg fontconfig fonts-dejavu-core && rm -rf /var/lib/apt/lists/*
+RUN mkdir -p /usr/local/share/fonts && \
+    curl -L --fail --retry 3 "https://raw.githubusercontent.com/google/fonts/main/ofl/tiktoksans/TikTokSans%5Bopsz%2Cslnt%2Cwdth%2Cwght%5D.ttf" -o /usr/local/share/fonts/TikTokSans.ttf && \
+    fc-cache -f
 COPY requirements.txt ./
 RUN pip install --upgrade pip && pip install -r requirements.txt
 COPY backend ./backend
