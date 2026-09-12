@@ -4,7 +4,7 @@ import re
 from dataclasses import replace
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy.orm import Session
 
 import backend.api as base_api
@@ -190,6 +190,7 @@ def text_overlay_config(job_id: str, db: Session = Depends(get_db)):
 @router.post("/jobs/{job_id}/apply-text-overlay", dependencies=[Depends(require_api_key)])
 def apply_text_overlay(
     job_id: str,
+    http_request: Request,
     req: ApplyTextOverlayRequest | None = None,
     db: Session = Depends(get_db),
 ):
@@ -230,6 +231,9 @@ def apply_text_overlay(
     prefix_tokens = _emoji_tokens(request.emoji_prefix)
     suffix_tokens = _emoji_tokens(request.emoji_suffix)
     source = str(request.emoji_source or "server_cache").strip().lower()
+    user_agent = str(http_request.headers.get("user-agent") or "")
+    if re.search(r"Macintosh|Mac OS X|iPhone|iPad|iPod", user_agent, re.IGNORECASE):
+        source = "apple_browser"
 
     # Apple devices seed/update the permanent server cache. Windows never overwrites it.
     if source == "apple_browser":
