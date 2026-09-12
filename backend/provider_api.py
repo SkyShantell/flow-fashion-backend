@@ -9,12 +9,14 @@ from sqlalchemy.orm import Session
 
 import backend.api as base_api
 import backend.tasks as tasks
+import backend.shoe_o1 as shoe_o1
 from backend.api import app, get_db, require_api_key
 from backend.flow_account_affinity import install_flow_account_affinity
 from backend.models import Batch, ProductJob
 from backend.schemas import UpdateVideoProviderRequest
 from backend.services import useapi
-from backend.shoe_o1 import install_shoe_o1_handlers, shoe_o1_images_ready, shoe_o1_video_prompt
+from backend.shoe_o1 import install_shoe_o1_handlers, shoe_o1_images_ready
+from backend.shoe_o1_prompt import shoe_o1_video_prompt
 from backend.text_overlay import install_text_overlay_handler
 from backend.video_provider import install_video_provider_handlers, provider_config
 
@@ -27,6 +29,7 @@ router = APIRouter()
 install_flow_account_affinity()
 install_video_provider_handlers()
 install_text_overlay_handler()
+shoe_o1.shoe_o1_video_prompt = shoe_o1_video_prompt
 install_shoe_o1_handlers()
 
 # Shoe O1 can use the approved Flow opener + six product references. Keep the worker's
