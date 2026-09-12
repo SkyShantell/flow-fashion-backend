@@ -22,20 +22,34 @@ install_flow_account_affinity()
 install_text_overlay_handler()
 
 
-# The dashboard already renders a final-video action whenever JobOut.video_url is present.
-# Some uploaded final MP4 assets do not return a public UseAPI URL, so provide a stable
-# same-origin download route instead of leaving completed jobs with no link at all.
+# Never expose a provider/raw video as the final deliverable. A finished fashion video
+# must have a distinct post-processed media ID from the source media ID before the
+# dashboard gets a playable/downloadable URL.
 _original_job_out = base_api.job_out
+
+
+def _has_final_text_render(job: ProductJob) -> bool:
+    final_id = str(job.video_media_id or "").strip()
+    source_id = str(job.video_source_media_id or "").strip()
+    if not final_id:
+        return False
+    return not source_id or final_id != source_id
 
 
 def _job_out_with_download(job: ProductJob):
     out = _original_job_out(job)
-    if (
-        not getattr(out, "video_url", None)
-        and str(job.stage or "") in {"video_complete", "complete"}
-        and (job.video_media_id or job.video_source_media_id or job.drive_video_id)
-    ):
-        out.video_url = f"/api/backend/jobs/{job.id}/download-video"
+    if str(job.stage or "") in {"video_complete", "complete"}:
+        if _has_final_text_render(job):
+            # Force every completed job through the backend final-video route so the UI
+            # cannot accidentally expose an older provider/upscale URL without text.
+            out.video_url = f"/api/backend/jobs/{job.id}/download-video"
+        else:
+            # Fail closed while FFmpeg finalization is pending rather than showing raw video.
+            out.video_url = None
+            if hasattr(out, "drive_video_url"):
+                out.drive_video_url = None
+            if hasattr(out, "drive_video_download_url"):
+                out.drive_video_download_url = None
     return out
 
 
@@ -49,6 +63,8 @@ def download_final_video(job_id: str, db: Session = Depends(get_db)):
         raise HTTPException(404, "Job not found")
     if str(job.stage or "") not in {"video_complete", "complete"}:
         raise HTTPException(409, "Final video is still processing")
+    if not _has_final_text_render(job):
+        raise HTTPException(409, "Final text overlay is still processing")
 
     video_bytes = tasks._download_final_video_for_archive(job)
     if not video_bytes:
@@ -60,7 +76,8 @@ def download_final_video(job_id: str, db: Session = Depends(get_db)):
         media_type="video/mp4",
         headers={
             "Content-Disposition": f'attachment; filename="{base_name}.mp4"',
-            "Cache-Control": "no-store",
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
         },
     )
 
