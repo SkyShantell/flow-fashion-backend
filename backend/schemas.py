@@ -99,6 +99,10 @@ class ApplyTextOverlayRequest(BaseModel):
     preset: str = "luxury_serif"
     emoji_prefix: str = ""
     emoji_suffix: str = ""
+    # Transparent PNG data URLs rendered by the user's browser. On macOS/iOS the
+    # browser uses Apple Color Emoji, so Railway never needs Apple's proprietary font.
+    emoji_prefix_pngs: list[str] = Field(default_factory=list)
+    emoji_suffix_pngs: list[str] = Field(default_factory=list)
     headline_color: str = "white"
     subheadline_color: str = "white"
     placement: str = "middle"
