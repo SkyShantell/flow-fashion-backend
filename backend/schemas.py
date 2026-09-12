@@ -93,6 +93,17 @@ class EditorialRegenerateRequest(BaseModel):
     prompt: str = ""
 
 
+class ApplyTextOverlayRequest(BaseModel):
+    headline: str = ""
+    subheadline: str = ""
+    preset: str = "luxury_serif"
+    emoji_prefix: str = ""
+    emoji_suffix: str = ""
+    headline_color: str = "white"
+    subheadline_color: str = "white"
+    placement: str = "middle"
+
+
 class JobOut(BaseModel):
     id: str
     batch_id: str
