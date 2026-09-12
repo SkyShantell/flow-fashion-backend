@@ -113,7 +113,7 @@ def _burn_text(video_bytes: bytes, caption: str, placement_seed: str) -> bytes:
 
         drawtext = (
             f"drawtext=fontfile={_font_file()}:textfile={text_path}:expansion=none:"
-            "fontcolor=white:fontsize=h*0.021:borderw=1:bordercolor=black@0.30:"
+            "fontcolor=white:fontsize=h*0.024:borderw=1:bordercolor=black@0.30:"
             "shadowcolor=black@0.45:shadowx=1:shadowy=1:line_spacing=6:fix_bounds=1:"
             f"x={x_expr}:y={y_expr}"
         )
