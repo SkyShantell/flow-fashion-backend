@@ -51,6 +51,12 @@ class Batch(Base):
     # Null means Automatic / load balance. A value pins this batch to one Flow account.
     flow_account_email = Column(String(320), nullable=True)
 
+    # Images always use Google Flow. This setting controls the approved-image -> video step.
+    video_provider = Column(String(40), default="omni")  # omni | kling
+    kling_account_email = Column(String(320), nullable=True)
+    kling_model = Column(String(80), default="kling-v3-0")
+    kling_mode = Column(String(20), default="pro")
+
     status = Column(String(80), default="open")
     created_at = Column(DateTime(timezone=True), default=utcnow)
     updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
@@ -107,6 +113,8 @@ class ProductJob(Base):
     video_url = Column(Text, nullable=True)
     video_resolution = Column(String(40), nullable=True)
     video_source_email = Column(String(320), nullable=True)
+    video_provider_used = Column(String(40), nullable=True)
+    video_provider_account = Column(String(320), nullable=True)
     upscale_error = Column(Text, nullable=True)
 
     drive_image_id = Column(String(160), nullable=True)
