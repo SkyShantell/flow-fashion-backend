@@ -12,7 +12,8 @@ import backend.tasks as tasks
 import backend.shoe_o1 as shoe_o1
 from backend.api import app, get_db, require_api_key
 from backend.flow_account_affinity import install_flow_account_affinity
-from backend.models import Batch, ProductJob
+from backend.manual_ffmpeg import caption_for_job, install_manual_ffmpeg_handler
+from backend.models import Batch, ProductJob, QueueTask
 from backend.schemas import UpdateVideoProviderRequest
 from backend.services import useapi
 from backend.shoe_o1 import install_shoe_o1_handlers, shoe_o1_images_ready
@@ -31,6 +32,7 @@ install_video_provider_handlers()
 install_text_overlay_handler()
 shoe_o1.shoe_o1_video_prompt = shoe_o1_video_prompt
 install_shoe_o1_handlers()
+install_manual_ffmpeg_handler()
 
 # Shoe O1 can use the approved Flow opener + six product references. Keep the worker's
 # Flow image-reference cap unchanged; this API-only override lets a shoe job persist a
@@ -48,34 +50,16 @@ base_api.shoe_showcase_video_prompt = shoe_o1_video_prompt
 base_api._editorial_images_ready = shoe_o1_images_ready
 
 
-# Never expose a provider/raw video as the final deliverable. A finished fashion video
-# must have a distinct post-processed media ID from the source media ID before the
-# dashboard gets a playable/downloadable URL.
+# Returned provider/upscaled videos are intentionally exposed before FFmpeg. The user
+# reviews the main video first, then manually starts text rendering from the dashboard.
 _original_job_out = base_api.job_out
-
-
-def _has_final_text_render(job: ProductJob) -> bool:
-    final_id = str(job.video_media_id or "").strip()
-    source_id = str(job.video_source_media_id or "").strip()
-    if not final_id:
-        return False
-    return not source_id or final_id != source_id
 
 
 def _job_out_with_download(job: ProductJob):
     out = _original_job_out(job)
-    if str(job.stage or "") in {"video_complete", "complete"}:
-        if _has_final_text_render(job):
-            # Force every completed job through the backend final-video route so the UI
-            # cannot accidentally expose an older provider/upscale URL without text.
+    if str(job.stage or "") in {"video_complete", "finalizing_text", "complete"}:
+        if job.video_media_id or job.video_source_media_id or job.video_url or job.video_source_url:
             out.video_url = f"/api/backend/jobs/{job.id}/download-video"
-        else:
-            # Fail closed while FFmpeg finalization is pending rather than showing raw video.
-            out.video_url = None
-            if hasattr(out, "drive_video_url"):
-                out.drive_video_url = None
-            if hasattr(out, "drive_video_download_url"):
-                out.drive_video_download_url = None
     return out
 
 
@@ -108,14 +92,12 @@ def download_final_video(job_id: str, db: Session = Depends(get_db)):
     job = db.get(ProductJob, job_id)
     if not job:
         raise HTTPException(404, "Job not found")
-    if str(job.stage or "") not in {"video_complete", "complete"}:
-        raise HTTPException(409, "Final video is still processing")
-    if not _has_final_text_render(job):
-        raise HTTPException(409, "Final text overlay is still processing")
+    if str(job.stage or "") not in {"video_complete", "finalizing_text", "complete"}:
+        raise HTTPException(409, "Video is still processing")
 
     video_bytes = tasks._download_final_video_for_archive(job)
     if not video_bytes:
-        raise HTTPException(404, "Final video file is not available")
+        raise HTTPException(404, "Video file is not available")
 
     base_name = re.sub(r"[^A-Za-z0-9._-]+", "-", str(job.product_name or "video")).strip("-._")[:80] or "video"
     return Response(
@@ -127,6 +109,58 @@ def download_final_video(job_id: str, db: Session = Depends(get_db)):
             "Pragma": "no-cache",
         },
     )
+
+
+@router.post("/jobs/{job_id}/apply-text-overlay", dependencies=[Depends(require_api_key)])
+def apply_text_overlay(job_id: str, db: Session = Depends(get_db)):
+    job = db.get(ProductJob, job_id)
+    if not job:
+        raise HTTPException(404, "Job not found")
+    if str(job.video_status or "").lower() != "completed":
+        raise HTTPException(409, "Wait for the main video to finish first")
+    if str(job.stage or "") == "complete":
+        raise HTTPException(409, "FFmpeg text has already been applied to this video")
+    if str(job.stage or "") not in {"video_complete", "finalizing_text"}:
+        raise HTTPException(409, "This video is not ready for FFmpeg yet")
+
+    active = (
+        db.query(QueueTask)
+        .filter(
+            QueueTask.job_id == job.id,
+            QueueTask.task_type == "apply_text_overlay",
+            QueueTask.status.in_(["queued", "running"]),
+        )
+        .order_by(QueueTask.created_at.desc())
+        .first()
+    )
+    if active:
+        return {
+            "ok": True,
+            "status": active.status,
+            "caption": caption_for_job(job),
+            "task_id": active.id,
+        }
+
+    job.stage = "finalizing_text"
+    db.add(job)
+    db.flush()
+    task = tasks.enqueue_task(
+        db,
+        "apply_text_overlay",
+        job_id=job.id,
+        batch_id=job.batch_id,
+        payload={"video_job_id": str(job.video_job_id or "")},
+        priority=75,
+        max_attempts=2,
+        allow_duplicate=True,
+    )
+    db.commit()
+    return {
+        "ok": True,
+        "status": "queued",
+        "caption": caption_for_job(job),
+        "task_id": task.id,
+    }
 
 
 @router.get("/api/video-provider/health")
@@ -142,6 +176,7 @@ def video_provider_health():
         "kling_audio": False,
         "automatic_fallback": False,
         "fashion_text_overlay": True,
+        "ffmpeg_text_mode": "manual",
     }
 
 
