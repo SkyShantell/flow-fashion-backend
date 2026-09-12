@@ -16,7 +16,17 @@ import backend.tasks as tasks
 
 _INSTALLED = False
 _ORIGINAL_ARCHIVE_MEDIA: Callable[[Session, QueueTask], None] | None = None
-_FONT_FILE = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+_FONT_FILES = (
+    "/usr/local/share/fonts/TikTokSans.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+)
+
+
+def _font_file() -> str:
+    for path in _FONT_FILES:
+        if Path(path).exists():
+            return path
+    return _FONT_FILES[-1]
 
 
 def _fashion_caption(job: ProductJob) -> str:
@@ -70,14 +80,14 @@ def _fashion_caption(job: ProductJob) -> str:
 
 def _wrap_caption(text: str) -> str:
     text = re.sub(r"\s+", " ", str(text or "").strip()).lower()
-    if len(text) <= 30:
+    if len(text) <= 34:
         return text
-    lines = textwrap.wrap(text, width=28, break_long_words=False, break_on_hyphens=False)
+    lines = textwrap.wrap(text, width=30, break_long_words=False, break_on_hyphens=False)
     if len(lines) <= 2:
         return "\n".join(lines)
     second = lines[1]
-    if len(second) > 25:
-        second = second[:24].rstrip() + "…"
+    if len(second) > 28:
+        second = second[:27].rstrip() + "…"
     return lines[0] + "\n" + second
 
 
@@ -102,9 +112,9 @@ def _burn_text(video_bytes: bytes, caption: str, placement_seed: str) -> bytes:
         text_path.write_text(_wrap_caption(caption), encoding="utf-8")
 
         drawtext = (
-            f"drawtext=fontfile={_FONT_FILE}:textfile={text_path}:expansion=none:"
-            "fontcolor=white:fontsize=h*0.038:borderw=2:bordercolor=black@0.35:"
-            "shadowcolor=black@0.60:shadowx=2:shadowy=2:line_spacing=10:fix_bounds=1:"
+            f"drawtext=fontfile={_font_file()}:textfile={text_path}:expansion=none:"
+            "fontcolor=white:fontsize=h*0.021:borderw=1:bordercolor=black@0.30:"
+            "shadowcolor=black@0.45:shadowx=1:shadowy=1:line_spacing=6:fix_bounds=1:"
             f"x={x_expr}:y={y_expr}"
         )
         cmd = [
@@ -130,8 +140,6 @@ def _run_archive_with_text_overlay(db: Session, task: QueueTask) -> None:
     batch = db.get(Batch, job.batch_id) if job else None
     payload = dict(task.payload or {})
 
-    # Archive is the first step after a final video is ready, so burn the text here before
-    # Drive receives the file. The task marker makes retries idempotent.
     if (
         job
         and batch
