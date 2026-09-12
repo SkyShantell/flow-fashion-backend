@@ -60,22 +60,26 @@ def run_apply_text_overlay(db: Session, task: QueueTask) -> None:
         preset = str(payload.get("preset") or "luxury_serif").strip()[:40]
         emoji_prefix = str(payload.get("emoji_prefix") or "").strip()[:80]
         emoji_suffix = str(payload.get("emoji_suffix") or "").strip()[:80]
+        emoji_prefix_pngs = list(payload.get("emoji_prefix_pngs") or [])[:8]
+        emoji_suffix_pngs = list(payload.get("emoji_suffix_pngs") or [])[:8]
         headline_color = str(payload.get("headline_color") or "white").strip()[:30]
         subheadline_color = str(payload.get("subheadline_color") or "white").strip()[:30]
         placement = str(payload.get("placement") or "middle").strip()[:20]
 
         log.info(
-            "Manual styled FFmpeg started · job=%s · preset=%s · headline=%s",
+            "Manual styled FFmpeg started · job=%s · preset=%s · headline=%s · apple_emoji=%s",
             job.id,
             preset,
             headline,
+            bool(emoji_prefix_pngs or emoji_suffix_pngs),
         )
         original_bytes = tasks._download_final_video_for_archive(job)
         if not original_bytes:
             raise RuntimeError("Could not download the returned video for FFmpeg.")
 
-        # Text and color emoji are rendered into a transparent PNG layer first. FFmpeg only
-        # composites that finished layer onto the video, so mixed fonts and emoji stay reliable.
+        # Text and emoji are rendered into a transparent PNG layer first. Exact Apple
+        # emoji arrives as PNGs rendered locally by the user's Mac/iPhone/iPad browser.
+        # FFmpeg only composites that finished layer onto the real video.
         final_bytes = render_styled_overlay(
             original_bytes,
             headline=headline,
@@ -83,6 +87,8 @@ def run_apply_text_overlay(db: Session, task: QueueTask) -> None:
             preset=preset,
             emoji_prefix=emoji_prefix,
             emoji_suffix=emoji_suffix,
+            emoji_prefix_pngs=emoji_prefix_pngs,
+            emoji_suffix_pngs=emoji_suffix_pngs,
             headline_color=headline_color,
             subheadline_color=subheadline_color,
             placement=placement,
@@ -113,6 +119,8 @@ def run_apply_text_overlay(db: Session, task: QueueTask) -> None:
             "fashion_text_overlay_preset": preset,
             "fashion_text_overlay_emoji_prefix": emoji_prefix,
             "fashion_text_overlay_emoji_suffix": emoji_suffix,
+            # Do not duplicate the large PNG data URLs into the archival metadata fields.
+            "fashion_text_overlay_emoji_mode": "browser_system_png" if (emoji_prefix_pngs or emoji_suffix_pngs) else "fallback",
             "fashion_text_overlay_headline_color": headline_color,
             "fashion_text_overlay_subheadline_color": subheadline_color,
             "fashion_text_overlay_placement": placement,
