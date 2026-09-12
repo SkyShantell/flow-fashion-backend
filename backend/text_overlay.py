@@ -18,6 +18,7 @@ import backend.tasks as tasks
 log = logging.getLogger("flow-text-overlay")
 _INSTALLED = False
 _ORIGINAL_ARCHIVE_MEDIA: Callable[[Session, QueueTask], None] | None = None
+_ORIGINAL_ENQUEUE_TASK: Callable[..., QueueTask] | None = None
 _FONT_FILES = (
     "/usr/local/share/fonts/TikTokSans.ttf",
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
@@ -134,6 +135,29 @@ def _burn_text(video_bytes: bytes, caption: str, placement_seed: str) -> bytes:
         return output_path.read_bytes()
 
 
+def _enqueue_with_text_finalizing(db: Session, task_type: str, **kwargs) -> QueueTask:
+    """Hide the raw provider video as soon as final text rendering is queued."""
+    if _ORIGINAL_ENQUEUE_TASK is None:
+        raise RuntimeError("Original enqueue_task is unavailable.")
+
+    if task_type == "archive_media":
+        job_id = str(kwargs.get("job_id") or "").strip()
+        if job_id:
+            job = db.get(ProductJob, job_id)
+            if job and job.stage == "video_complete":
+                # Keep a recoverable raw source for FFmpeg, but do not expose it as the
+                # final video while the text-burn step is still processing.
+                if job.video_url and not job.video_source_url:
+                    job.video_source_url = job.video_url
+                job.video_url = None
+                job.stage = "finalizing_text"
+                db.add(job)
+                db.flush()
+                log.info("Finalizing text overlay · job=%s", job.id)
+
+    return _ORIGINAL_ENQUEUE_TASK(db, task_type, **kwargs)
+
+
 def _run_archive_with_text_overlay(db: Session, task: QueueTask) -> None:
     if _ORIGINAL_ARCHIVE_MEDIA is None:
         raise RuntimeError("Archive handler is unavailable.")
@@ -142,12 +166,12 @@ def _run_archive_with_text_overlay(db: Session, task: QueueTask) -> None:
     batch = db.get(Batch, job.batch_id) if job else None
     payload = dict(task.payload or {})
 
-    # Text overlay is part of finalization, not an optional Drive-only step. Do not let
-    # an existing/stale Drive file cause a newly generated video to skip FFmpeg.
+    # Text overlay is a required finalization step. The raw provider/upscale video is
+    # intentionally hidden from the UI until this block completes.
     if (
         job
         and batch
-        and job.stage in {"video_complete", "complete"}
+        and job.stage in {"finalizing_text", "video_complete", "complete"}
         and not payload.get("fashion_text_overlay_applied")
         and (job.video_media_id or job.video_url or job.video_source_media_id or job.video_source_url)
     ):
@@ -166,6 +190,7 @@ def _run_archive_with_text_overlay(db: Session, task: QueueTask) -> None:
         job.video_url = useapi.resolve_asset_url(final_media_id) or None
         job.video_source_email = str(uploaded.get("email") or job.video_source_email or "").strip() or None
         job.video_error = None
+        job.stage = "video_complete"
 
         # Any previous Drive video points at an older/raw render. Clear only the video
         # archive references so the normal archive handler stores the text-burned MP4.
@@ -187,13 +212,15 @@ def _run_archive_with_text_overlay(db: Session, task: QueueTask) -> None:
 
 
 def install_text_overlay_handler() -> None:
-    """Burn TikTok-style fashion text onto the final video before archive."""
-    global _INSTALLED, _ORIGINAL_ARCHIVE_MEDIA
+    """Burn TikTok-style fashion text onto the final video before it can be exposed."""
+    global _INSTALLED, _ORIGINAL_ARCHIVE_MEDIA, _ORIGINAL_ENQUEUE_TASK
     if _INSTALLED:
         return
     original = tasks.HANDLERS.get("archive_media")
     if original is None:
         raise RuntimeError("Existing archive handler could not be located.")
     _ORIGINAL_ARCHIVE_MEDIA = original
+    _ORIGINAL_ENQUEUE_TASK = tasks.enqueue_task
+    tasks.enqueue_task = _enqueue_with_text_finalizing
     tasks.HANDLERS["archive_media"] = _run_archive_with_text_overlay
     _INSTALLED = True
