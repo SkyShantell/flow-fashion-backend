@@ -9,6 +9,7 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from backend.config import settings
 from backend.db import init_db, session_scope
 from backend.tasks import claim_next_task, run_task_by_id
+from backend.video_provider import install_video_provider_handlers
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("flow-worker")
@@ -33,9 +34,16 @@ def _claim_task_id() -> str | None:
 
 def main():
     init_db()
+    install_video_provider_handlers()
     cfg = settings()
     concurrency = max(1, int(cfg.worker_concurrency or 1))
-    log.info("Flow Phase 1 worker started · concurrency=%s · image=%s · video=%s · final=%s", concurrency, cfg.image_model, cfg.video_model, cfg.video_final_resolution)
+    log.info(
+        "Flow Phase 1 worker started · concurrency=%s · image=%s · Flow video=%s · manual Kling=3.0/8s/silent/single-shot · final=%s",
+        concurrency,
+        cfg.image_model,
+        cfg.video_model,
+        cfg.video_final_resolution,
+    )
     in_flight = set()
     with ThreadPoolExecutor(max_workers=concurrency) as ex:
         while not stop:
