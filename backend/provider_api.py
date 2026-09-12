@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from fastapi import Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from backend.api import app, get_db, require_api_key
@@ -12,7 +12,23 @@ from backend.services import useapi
 from backend.video_provider import provider_config
 
 
-@app.get("/api/kling/accounts", dependencies=[Depends(require_api_key)])
+router = APIRouter()
+
+
+@router.get("/api/video-provider/health")
+def video_provider_health():
+    return {
+        "ok": True,
+        "providers": ["omni", "kling"],
+        "kling_model": "kling-v3-0",
+        "kling_duration": 8,
+        "kling_audio": False,
+        "kling_multi_shot": False,
+        "automatic_fallback": False,
+    }
+
+
+@router.get("/api/kling/accounts", dependencies=[Depends(require_api_key)])
 def kling_accounts_status():
     """Return sanitized UseAPI Kling account metadata. No auth token leaves the backend."""
     try:
@@ -21,7 +37,7 @@ def kling_accounts_status():
         raise HTTPException(502, f"Could not load Kling accounts: {exc}")
 
 
-@app.get("/batches/{batch_id}/video-provider", dependencies=[Depends(require_api_key)])
+@router.get("/batches/{batch_id}/video-provider", dependencies=[Depends(require_api_key)])
 def get_batch_video_provider(batch_id: str, db: Session = Depends(get_db)):
     batch = db.get(Batch, batch_id)
     if not batch:
@@ -29,7 +45,7 @@ def get_batch_video_provider(batch_id: str, db: Session = Depends(get_db)):
     return provider_config(batch)
 
 
-@app.put("/batches/{batch_id}/video-provider", dependencies=[Depends(require_api_key)])
+@router.put("/batches/{batch_id}/video-provider", dependencies=[Depends(require_api_key)])
 def update_batch_video_provider(
     batch_id: str,
     req: UpdateVideoProviderRequest,
@@ -71,3 +87,9 @@ def update_batch_video_provider(
     db.commit()
     db.refresh(batch)
     return provider_config(batch)
+
+
+# Register these routes explicitly on the existing Flow Fashion FastAPI app.
+# Keeping registration here lets Railway run backend.provider_api:app while
+# preserving all existing backend.api routes.
+app.include_router(router)
