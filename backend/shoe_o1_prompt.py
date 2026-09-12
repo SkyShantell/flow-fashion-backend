@@ -24,6 +24,7 @@ def shoe_o1_video_prompt(job, *, creator_profile: str = "Female", reference_coun
     prompt = _clean(f"""
         9:16 vertical, 10 seconds. Use the supplied approved Flow start image @image_1 as the exact first frame. Begin by perfectly matching @image_1, then move. {extra_rule}
         PRODUCT LOCK: preserve the exact shoe from @image_1 throughout: exact color, materials, silhouette, toe, sole/tread, heel, stitching, laces/closures, hardware, branding and proportions. No morphing, recoloring, redesign, duplicate shoes or invented features.
+        MATERIAL LOCK: preserve exact grain/nap/weave/mesh, thickness, sheen, flex and material transitions; never substitute or smooth the visible texture.
         VISIBILITY: no face, no upper body, no extra people. Hand-held shots show no person above the forearm. On-foot shots stay tightly product-focused. Silent. No generated text, captions, subtitles, watermarks or added logos.
         Environment: same dark luxury car as @image_1, black leather and subtle gloss-black/chrome trim, moody ambient light. Premium editorial phone-camera realism; shoe stays large in frame.
         SHOT 1 · 0:00–0:03: Start exactly on @image_1. The {hand} lifts, tilts and repositions the shoe with clear controlled energy; subtle camera push/reframe.
