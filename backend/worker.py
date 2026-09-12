@@ -12,7 +12,9 @@ from backend.tasks import claim_next_task, run_task_by_id
 from backend.flow_account_affinity import install_flow_account_affinity
 from backend.video_provider import install_video_provider_handlers
 from backend.text_overlay import install_text_overlay_handler
+import backend.shoe_o1 as shoe_o1
 from backend.shoe_o1 import install_shoe_o1_handlers
+from backend.shoe_o1_prompt import shoe_o1_video_prompt
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("flow-worker")
@@ -40,6 +42,9 @@ def main():
     install_flow_account_affinity()
     install_video_provider_handlers()
     install_text_overlay_handler()
+    # Use the compact O1 prompt that preserves every critical product/visibility rule
+    # while staying under Kling's 1700-character Omni prompt limit.
+    shoe_o1.shoe_o1_video_prompt = shoe_o1_video_prompt
     # Install last so Shoe Showcase overrides only its own image/video tasks while
     # Fashion Try-On keeps the existing Flow/Kling 3.0 + text-overlay handler chain.
     install_shoe_o1_handlers()
