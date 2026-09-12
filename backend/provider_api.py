@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from backend.api import app, get_db, require_api_key
+from backend.flow_account_affinity import install_flow_account_affinity
 from backend.models import Batch
 from backend.schemas import UpdateVideoProviderRequest
 from backend.services import useapi
@@ -13,6 +14,7 @@ from backend.video_provider import provider_config
 
 
 router = APIRouter()
+install_flow_account_affinity()
 
 
 @router.get("/api/video-provider/health")
