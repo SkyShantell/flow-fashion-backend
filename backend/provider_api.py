@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy.orm import Session
 
+import backend.api as base_api
+import backend.tasks as tasks
 from backend.api import app, get_db, require_api_key
 from backend.flow_account_affinity import install_flow_account_affinity
-from backend.models import Batch
+from backend.models import Batch, ProductJob
 from backend.schemas import UpdateVideoProviderRequest
 from backend.services import useapi
 from backend.text_overlay import install_text_overlay_handler
@@ -17,6 +20,49 @@ from backend.video_provider import provider_config
 router = APIRouter()
 install_flow_account_affinity()
 install_text_overlay_handler()
+
+
+# The dashboard already renders a final-video action whenever JobOut.video_url is present.
+# Some uploaded final MP4 assets do not return a public UseAPI URL, so provide a stable
+# same-origin download route instead of leaving completed jobs with no link at all.
+_original_job_out = base_api.job_out
+
+
+def _job_out_with_download(job: ProductJob):
+    out = _original_job_out(job)
+    if (
+        not getattr(out, "video_url", None)
+        and str(job.stage or "") in {"video_complete", "complete"}
+        and (job.video_media_id or job.video_source_media_id or job.drive_video_id)
+    ):
+        out.video_url = f"/api/backend/jobs/{job.id}/download-video"
+    return out
+
+
+base_api.job_out = _job_out_with_download
+
+
+@router.get("/jobs/{job_id}/download-video", dependencies=[Depends(require_api_key)])
+def download_final_video(job_id: str, db: Session = Depends(get_db)):
+    job = db.get(ProductJob, job_id)
+    if not job:
+        raise HTTPException(404, "Job not found")
+    if str(job.stage or "") not in {"video_complete", "complete"}:
+        raise HTTPException(409, "Final video is still processing")
+
+    video_bytes = tasks._download_final_video_for_archive(job)
+    if not video_bytes:
+        raise HTTPException(404, "Final video file is not available")
+
+    base_name = re.sub(r"[^A-Za-z0-9._-]+", "-", str(job.product_name or "video")).strip("-._")[:80] or "video"
+    return Response(
+        content=video_bytes,
+        media_type="video/mp4",
+        headers={
+            "Content-Disposition": f'attachment; filename="{base_name}.mp4"',
+            "Cache-Control": "no-store",
+        },
+    )
 
 
 @router.get("/api/video-provider/health")
