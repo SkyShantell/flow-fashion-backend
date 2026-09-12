@@ -11,6 +11,7 @@ from backend.db import init_db, session_scope
 from backend.tasks import claim_next_task, run_task_by_id
 from backend.flow_account_affinity import install_flow_account_affinity
 from backend.video_provider import install_video_provider_handlers
+from backend.text_overlay import install_text_overlay_handler
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("flow-worker")
@@ -37,10 +38,11 @@ def main():
     init_db()
     install_flow_account_affinity()
     install_video_provider_handlers()
+    install_text_overlay_handler()
     cfg = settings()
     concurrency = max(1, int(cfg.worker_concurrency or 1))
     log.info(
-        "Flow Phase 1 worker started · concurrency=%s · image=%s · Flow video=%s · manual Kling=3.0/8s/silent/single-shot · final=%s",
+        "Flow Phase 1 worker started · concurrency=%s · image=%s · Flow video=%s · manual Kling=3.0/8s/silent/single-shot · final=%s · FFmpeg text overlay=on",
         concurrency,
         cfg.image_model,
         cfg.video_model,
