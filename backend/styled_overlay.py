@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import io
 import os
 import subprocess
@@ -85,6 +86,7 @@ def overlay_options() -> dict:
             {"id": "middle", "label": "Middle"},
             {"id": "lower", "label": "Lower"},
         ],
+        "emoji_mode": "browser_system_png",
     }
 
 
@@ -124,6 +126,7 @@ def _emoji_codepoint(token: str) -> str:
 
 
 def _emoji_asset(token: str, size: int) -> Image.Image | None:
+    """Fallback only. Exact Apple emoji comes from browser-rendered PNGs when supplied."""
     token = str(token or "").strip()
     if not token:
         return None
@@ -147,10 +150,43 @@ def _emoji_asset(token: str, size: int) -> Image.Image | None:
         return None
 
 
+def _emoji_from_data_url(value: str, size: int) -> Image.Image | None:
+    """Decode a transparent emoji PNG rendered by the user's browser/OS."""
+    value = str(value or "").strip()
+    if not value.startswith("data:image/png;base64,") or len(value) > 450_000:
+        return None
+    try:
+        raw = base64.b64decode(value.split(",", 1)[1], validate=True)
+        if not raw or len(raw) > 325_000:
+            return None
+        image = Image.open(io.BytesIO(raw)).convert("RGBA")
+        if image.width > 512 or image.height > 512:
+            return None
+        bbox = image.getbbox()
+        if bbox:
+            image = image.crop(bbox)
+        target = max(18, int(size))
+        image.thumbnail((target, target), Image.Resampling.LANCZOS)
+        return image
+    except Exception:
+        return None
+
+
 def _emoji_tokens(value: str) -> list[str]:
-    # Space-separated emoji gives predictable multi-codepoint handling without depending
-    # on a separate grapheme library. Typical input: "🤎 🍂 🍁 🐆".
-    return [x for x in str(value or "").strip().split() if x]
+    # The editor asks the user to separate emoji with spaces, preserving ZWJ sequences.
+    return [x for x in str(value or "").strip().split() if x][:8]
+
+
+def _resolved_emoji_images(tokens: list[str], pngs: list[str] | None, size: int) -> list[Image.Image]:
+    provided = list(pngs or [])[:8]
+    out: list[Image.Image] = []
+    for index, token in enumerate(tokens):
+        image = _emoji_from_data_url(provided[index], size) if index < len(provided) else None
+        if image is None:
+            image = _emoji_asset(token, size)
+        if image is not None:
+            out.append(image)
+    return out
 
 
 def _inline_headline(
@@ -165,9 +201,11 @@ def _inline_headline(
     suffix: str,
     emoji_size: int,
     stroke_width: int,
+    prefix_pngs: list[str] | None = None,
+    suffix_pngs: list[str] | None = None,
 ) -> int:
-    prefix_images = [img for token in _emoji_tokens(prefix) if (img := _emoji_asset(token, emoji_size)) is not None]
-    suffix_images = [img for token in _emoji_tokens(suffix) if (img := _emoji_asset(token, emoji_size)) is not None]
+    prefix_images = _resolved_emoji_images(_emoji_tokens(prefix), prefix_pngs, emoji_size)
+    suffix_images = _resolved_emoji_images(_emoji_tokens(suffix), suffix_pngs, emoji_size)
     text_w, text_h = _text_size(draw, text, font, stroke_width)
     gap = max(7, int(emoji_size * 0.14))
     group_w = text_w
@@ -227,6 +265,8 @@ def render_styled_overlay(
     preset: str = "luxury_serif",
     emoji_prefix: str = "",
     emoji_suffix: str = "",
+    emoji_prefix_pngs: list[str] | None = None,
+    emoji_suffix_pngs: list[str] | None = None,
     headline_color: str = "white",
     subheadline_color: str = "white",
     placement: str = "middle",
@@ -296,6 +336,8 @@ def render_styled_overlay(
             suffix=emoji_suffix,
             emoji_size=emoji_size,
             stroke_width=stroke_width,
+            prefix_pngs=emoji_prefix_pngs,
+            suffix_pngs=emoji_suffix_pngs,
         )
 
         if subheadline and sub_font:
