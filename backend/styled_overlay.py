@@ -121,12 +121,10 @@ def _fit_font(
 
 
 def _emoji_codepoint(token: str) -> str:
-    # Twemoji filenames omit the emoji presentation selector FE0F.
     return "-".join(f"{ord(ch):x}" for ch in token if ord(ch) != 0xFE0F)
 
 
 def _emoji_asset(token: str, size: int) -> Image.Image | None:
-    """Fallback only. Exact Apple emoji comes from browser-rendered PNGs when supplied."""
     token = str(token or "").strip()
     if not token:
         return None
@@ -151,7 +149,6 @@ def _emoji_asset(token: str, size: int) -> Image.Image | None:
 
 
 def _emoji_from_data_url(value: str, size: int) -> Image.Image | None:
-    """Decode a transparent emoji PNG rendered by the user's browser/OS."""
     value = str(value or "").strip()
     if not value.startswith("data:image/png;base64,") or len(value) > 450_000:
         return None
@@ -173,7 +170,6 @@ def _emoji_from_data_url(value: str, size: int) -> Image.Image | None:
 
 
 def _emoji_tokens(value: str) -> list[str]:
-    # The editor asks the user to separate emoji with spaces, preserving ZWJ sequences.
     return [x for x in str(value or "").strip().split() if x][:8]
 
 
@@ -352,22 +348,32 @@ def render_styled_overlay(
                 stroke_fill=(0, 0, 0, 90),
             )
 
-        canvas.save(overlay_path, "PNG")
+        # Do not hand FFmpeg a full 1080x1920 transparent overlay and ask it to decode that
+        # image 25 times per second. Crop once to the actual text/emoji pixels, then repeat that
+        # single decoded PNG frame in the overlay filter. This removes most of the needless work.
+        bbox = canvas.getbbox()
+        if not bbox:
+            raise RuntimeError("Styled overlay rendered no visible pixels.")
+        pad = max(4, int(height * 0.003))
+        left = max(0, bbox[0] - pad)
+        top = max(0, bbox[1] - pad)
+        right = min(width, bbox[2] + pad)
+        bottom = min(height, bbox[3] + pad)
+        cropped = canvas.crop((left, top, right, bottom))
+        cropped.save(overlay_path, "PNG", optimize=False)
 
-        # These generated videos are intentionally silent. Overlaying text requires a video
-        # re-encode, but there is no reason to probe/map/encode an audio stream that does not
-        # exist. `superfast` materially reduces CPU render time while keeping the 1080p frame.
         cmd = [
             "ffmpeg", "-y",
             "-i", str(input_path),
-            "-loop", "1", "-i", str(overlay_path),
-            "-filter_complex", "[0:v][1:v]overlay=0:0:format=auto[v]",
+            "-i", str(overlay_path),
+            "-filter_complex",
+            f"[0:v][1:v]overlay={left}:{top}:eof_action=repeat:repeatlast=1:eval=init:format=auto[v]",
             "-map", "[v]",
-            "-c:v", "libx264", "-preset", "superfast", "-crf", "19",
-            "-pix_fmt", "yuv420p", "-an",
-            "-movflags", "+faststart", "-shortest", str(output_path),
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20",
+            "-pix_fmt", "yuv420p", "-an", "-threads", "0",
+            "-movflags", "+faststart", str(output_path),
         ]
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
         if proc.returncode != 0 or not output_path.exists():
             error = (proc.stderr or proc.stdout or "FFmpeg overlay failed.")[-3000:]
             raise RuntimeError(f"FFmpeg styled overlay failed: {error}")
