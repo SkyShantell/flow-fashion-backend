@@ -9,6 +9,7 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from backend.config import settings
 from backend.db import init_db, session_scope
 from backend.tasks import claim_next_task, run_task_by_id
+from backend.flow_account_affinity import install_flow_account_affinity
 from backend.video_provider import install_video_provider_handlers
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(message)s")
@@ -34,6 +35,7 @@ def _claim_task_id() -> str | None:
 
 def main():
     init_db()
+    install_flow_account_affinity()
     install_video_provider_handlers()
     cfg = settings()
     concurrency = max(1, int(cfg.worker_concurrency or 1))
