@@ -29,6 +29,10 @@ class CreateBatchRequest(BaseModel):
     avatar_mime: str = "image/jpeg"
     avatar_name: str | None = None
     flow_account_email: str | None = None
+    video_provider: str = "omni"
+    kling_account_email: str | None = None
+    kling_model: str = "kling-v3-0"
+    kling_mode: str = "pro"
 
 
 class ImportProductsRequest(BaseModel):
@@ -52,6 +56,13 @@ class SelectProductRefsRequest(BaseModel):
 
 class UpdateFlowAccountRequest(BaseModel):
     flow_account_email: str | None = None
+
+
+class UpdateVideoProviderRequest(BaseModel):
+    video_provider: str = "omni"
+    kling_account_email: str | None = None
+    kling_model: str = "kling-v3-0"
+    kling_mode: str = "pro"
 
 
 class UpdateJobSettingsRequest(BaseModel):
@@ -103,6 +114,8 @@ class JobOut(BaseModel):
     upscale_status: str
     video_url: str | None
     video_resolution: str | None
+    video_provider_used: str | None = None
+    video_provider_account: str | None = None
     drive_video_url: str | None
     drive_video_download_url: str | None = None
     error: str | None = None
@@ -113,6 +126,10 @@ class BatchOut(BaseModel):
     name: str | None
     avatar_name: str | None = None
     flow_account_email: str | None = None
+    video_provider: str = "omni"
+    kling_account_email: str | None = None
+    kling_model: str = "kling-v3-0"
+    kling_mode: str = "pro"
     mode: str = "fashion_tryon"
     scene: str | None
     scene_pool: list[str] = Field(default_factory=list)
