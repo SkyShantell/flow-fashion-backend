@@ -13,8 +13,8 @@ import backend.shoe_o1 as shoe_o1
 from backend.api import app, get_db, require_api_key
 from backend.flow_account_affinity import install_flow_account_affinity
 from backend.manual_ffmpeg import caption_for_job, install_manual_ffmpeg_handler
-from backend.models import Batch, ProductJob, QueueTask
-from backend.schemas import ApplyTextOverlayRequest, UpdateVideoProviderRequest
+from backend.models import Batch, EmojiAsset, ProductJob, QueueTask
+from backend.schemas import ApplyTextOverlayRequest, EmojiSeedRequest, UpdateVideoProviderRequest
 from backend.services import useapi
 from backend.shoe_o1 import install_shoe_o1_handlers, shoe_o1_images_ready
 from backend.shoe_o1_prompt import shoe_o1_video_prompt
@@ -25,9 +25,6 @@ from backend.video_provider import install_video_provider_handlers, provider_con
 
 router = APIRouter()
 
-# API-side task helpers mirror the worker install order. The worker is what executes queued
-# jobs, but keeping the same handler chain here makes prompt previews and enqueue behavior
-# consistent with production.
 install_flow_account_affinity()
 install_video_provider_handlers()
 install_text_overlay_handler()
@@ -35,9 +32,6 @@ shoe_o1.shoe_o1_video_prompt = shoe_o1_video_prompt
 install_shoe_o1_handlers()
 install_manual_ffmpeg_handler()
 
-# Shoe O1 can use the approved Flow opener + six product references. Keep the worker's
-# Flow image-reference cap unchanged; this API-only override lets a shoe job persist a
-# sixth product ref for Kling even though Frame A still uses the existing Flow ref limit.
 _original_api_settings = base_api.settings
 
 
@@ -50,9 +44,6 @@ base_api.settings = _api_settings_with_o1_refs
 base_api.shoe_showcase_video_prompt = shoe_o1_video_prompt
 base_api._editorial_images_ready = shoe_o1_images_ready
 
-
-# Returned provider/upscaled videos are intentionally exposed before FFmpeg. The user
-# reviews the main video first, then manually starts text rendering from the dashboard.
 _original_job_out = base_api.job_out
 
 
@@ -88,13 +79,11 @@ def _provider_config(batch: Batch) -> dict:
     return provider_config(batch)
 
 
-def _safe_emoji_pngs(values: list[str] | None) -> list[str]:
-    """Accept only small browser-rendered transparent PNG data URLs."""
+def _safe_emoji_pngs(values: list[str] | None, limit: int = 120) -> list[str]:
     out: list[str] = []
-    for raw in list(values or [])[:8]:
+    for raw in list(values or [])[:limit]:
         value = str(raw or "").strip()
         if not value:
-            # Preserve token alignment when one local render fails.
             out.append("")
             continue
         if value.startswith("data:image/png;base64,") and len(value) <= 450_000:
@@ -102,6 +91,43 @@ def _safe_emoji_pngs(values: list[str] | None) -> list[str]:
         else:
             out.append("")
     return out
+
+
+def _emoji_tokens(value: str, limit: int = 8) -> list[str]:
+    return [token for token in str(value or "").strip().split() if token][:limit]
+
+
+def _cache_apple_assets(db: Session, tokens: list[str], pngs: list[str]) -> int:
+    safe_pngs = _safe_emoji_pngs(pngs, limit=max(1, len(tokens)))
+    saved = 0
+    for index, token in enumerate(tokens):
+        token = str(token or "").strip()[:160]
+        png = safe_pngs[index] if index < len(safe_pngs) else ""
+        if not token or not png:
+            continue
+        asset = db.get(EmojiAsset, token)
+        if asset is None:
+            asset = EmojiAsset(token=token, image_b64=png, source="apple_browser")
+        else:
+            asset.image_b64 = png
+            asset.source = "apple_browser"
+        db.add(asset)
+        saved += 1
+    db.flush()
+    return saved
+
+
+def _cached_apple_pngs(db: Session, tokens: list[str]) -> tuple[list[str], list[str]]:
+    pngs: list[str] = []
+    missing: list[str] = []
+    for token in tokens:
+        asset = db.get(EmojiAsset, token)
+        if asset and str(asset.source or "") == "apple_browser" and str(asset.image_b64 or "").startswith("data:image/png;base64,"):
+            pngs.append(str(asset.image_b64))
+        else:
+            pngs.append("")
+            missing.append(token)
+    return pngs, missing
 
 
 @router.get("/jobs/{job_id}/download-video", dependencies=[Depends(require_api_key)])
@@ -128,6 +154,18 @@ def download_final_video(job_id: str, db: Session = Depends(get_db)):
     )
 
 
+@router.post("/api/apple-emoji-assets", dependencies=[Depends(require_api_key)])
+def seed_apple_emoji_assets(req: EmojiSeedRequest, db: Session = Depends(get_db)):
+    if str(req.source or "").strip().lower() != "apple_browser":
+        raise HTTPException(400, "Apple emoji assets must be seeded from an Apple browser")
+    tokens = [str(token or "").strip()[:160] for token in list(req.tokens or [])[:120]]
+    if not tokens:
+        return {"ok": True, "saved": 0}
+    saved = _cache_apple_assets(db, tokens, list(req.pngs or [])[:120])
+    db.commit()
+    return {"ok": True, "saved": saved}
+
+
 @router.get("/jobs/{job_id}/text-overlay-config", dependencies=[Depends(require_api_key)])
 def text_overlay_config(job_id: str, db: Session = Depends(get_db)):
     job = db.get(ProductJob, job_id)
@@ -145,6 +183,7 @@ def text_overlay_config(job_id: str, db: Session = Depends(get_db)):
         "subheadline_color": "white",
         "placement": "middle",
         **overlay_options(),
+        "emoji_mode": "server_apple_cache",
     }
 
 
@@ -188,8 +227,24 @@ def apply_text_overlay(
     if not headline and not subheadline:
         raise HTTPException(400, "Add at least one line of text")
 
-    prefix_pngs = _safe_emoji_pngs(request.emoji_prefix_pngs)
-    suffix_pngs = _safe_emoji_pngs(request.emoji_suffix_pngs)
+    prefix_tokens = _emoji_tokens(request.emoji_prefix)
+    suffix_tokens = _emoji_tokens(request.emoji_suffix)
+    source = str(request.emoji_source or "server_cache").strip().lower()
+
+    # Apple devices seed/update the permanent server cache. Windows never overwrites it.
+    if source == "apple_browser":
+        _cache_apple_assets(db, prefix_tokens, list(request.emoji_prefix_pngs or []))
+        _cache_apple_assets(db, suffix_tokens, list(request.emoji_suffix_pngs or []))
+
+    prefix_pngs, prefix_missing = _cached_apple_pngs(db, prefix_tokens)
+    suffix_pngs, suffix_missing = _cached_apple_pngs(db, suffix_tokens)
+    missing = list(dict.fromkeys(prefix_missing + suffix_missing))
+    if missing:
+        preview = " ".join(missing[:5])
+        raise HTTPException(
+            409,
+            f"Apple emoji asset not installed for: {preview}. Open Style + FFmpeg once on a Mac to add it, then the Windows VA can use it.",
+        )
 
     job.stage = "finalizing_text"
     db.add(job)
@@ -221,7 +276,7 @@ def apply_text_overlay(
         "ok": True,
         "status": "queued",
         "caption": headline,
-        "emoji_mode": "browser_system_png" if any(prefix_pngs + suffix_pngs) else "fallback",
+        "emoji_mode": "server_apple_cache" if (prefix_tokens or suffix_tokens) else "none",
         "task_id": task.id,
     }
 
@@ -241,13 +296,12 @@ def video_provider_health():
         "fashion_text_overlay": True,
         "ffmpeg_text_mode": "manual_styled",
         "ffmpeg_color_emoji": True,
-        "ffmpeg_apple_emoji": "browser-rendered on Apple device",
+        "ffmpeg_apple_emoji": "persistent server cache seeded from Apple browser",
     }
 
 
 @router.get("/api/kling/accounts", dependencies=[Depends(require_api_key)])
 def kling_accounts_status():
-    """Return sanitized UseAPI Kling account metadata. No auth token leaves the backend."""
     try:
         return useapi.list_kling_accounts()
     except Exception as exc:
@@ -273,8 +327,6 @@ def update_batch_video_provider(
         raise HTTPException(404, "Batch not found")
 
     if (batch.mode or "fashion_tryon") == "shoe_showcase":
-        # Shoe Showcase is intentionally locked to O1. Flow remains the still-image
-        # generator only; the approved opener then becomes @image_1 for Kling O1.
         try:
             account = useapi.resolve_kling_account_email(
                 req.kling_account_email or batch.kling_account_email or ""
