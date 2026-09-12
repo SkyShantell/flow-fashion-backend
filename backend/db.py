@@ -43,12 +43,18 @@ def _add_missing_columns() -> None:
             "ALTER TABLE batches ADD COLUMN IF NOT EXISTS avatar_name VARCHAR(160)",
             "ALTER TABLE batches ADD COLUMN IF NOT EXISTS avatar_source_email VARCHAR(320)",
             "ALTER TABLE batches ADD COLUMN IF NOT EXISTS flow_account_email VARCHAR(320)",
+            "ALTER TABLE batches ADD COLUMN IF NOT EXISTS video_provider VARCHAR(40) DEFAULT 'omni'",
+            "ALTER TABLE batches ADD COLUMN IF NOT EXISTS kling_account_email VARCHAR(320)",
+            "ALTER TABLE batches ADD COLUMN IF NOT EXISTS kling_model VARCHAR(80) DEFAULT 'kling-v3-0'",
+            "ALTER TABLE batches ADD COLUMN IF NOT EXISTS kling_mode VARCHAR(20) DEFAULT 'pro'",
             "ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS scene_override VARCHAR(120)",
             "ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS motion_style_override VARCHAR(80)",
             "ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS editorial_shots JSON",
             "ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS flow_product_refs JSON",
             "ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS image_source_email VARCHAR(320)",
             "ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS video_source_email VARCHAR(320)",
+            "ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS video_provider_used VARCHAR(40)",
+            "ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS video_provider_account VARCHAR(320)",
         ]
         with engine.begin() as conn:
             for sql in statements:
@@ -64,6 +70,10 @@ def _add_missing_columns() -> None:
             "avatar_name": "VARCHAR(160)",
             "avatar_source_email": "VARCHAR(320)",
             "flow_account_email": "VARCHAR(320)",
+            "video_provider": "VARCHAR(40) DEFAULT 'omni'",
+            "kling_account_email": "VARCHAR(320)",
+            "kling_model": "VARCHAR(80) DEFAULT 'kling-v3-0'",
+            "kling_mode": "VARCHAR(20) DEFAULT 'pro'",
         },
         "product_jobs": {
             "scene_override": "VARCHAR(120)",
@@ -72,6 +82,8 @@ def _add_missing_columns() -> None:
             "flow_product_refs": "JSON",
             "image_source_email": "VARCHAR(320)",
             "video_source_email": "VARCHAR(320)",
+            "video_provider_used": "VARCHAR(40)",
+            "video_provider_account": "VARCHAR(320)",
         },
     }
     with engine.begin() as conn:
