@@ -29,37 +29,38 @@ jobs:
 
           old_import = "from backend.services import drive, editorial, sheets, sociavault, useapi"
           new_import = "from backend.services import drive, editorial, sheets, sociavault, tikhub, useapi"
-          if text.count(old_import) != 1:
-              raise SystemExit(f"Expected tasks import once, found {text.count(old_import)}")
-          text = text.replace(old_import, new_import, 1)
+          if old_import in text:
+              text = text.replace(old_import, new_import, 1)
+          elif new_import not in text:
+              raise SystemExit("Could not locate tasks provider import")
 
           start_marker = '    data = None\n    if region == "GB" and job.scanner_row_num:'
           end_marker = '    job.sociavault_region = str(data.get("sociavault_region") or region)'
-          start = text.find(start_marker)
-          end = text.find(end_marker, start)
-          if start < 0 or end < 0:
-              raise SystemExit("Could not locate old UK scanner fallback block")
-          replacement = '    if region == "GB":\n        data = tikhub.import_product(job.product_url, region="GB")\n    else:\n        data = sociavault.import_product(job.product_url, region=region)\n\n'
-          text = text[:start] + replacement + text[end:]
-          tasks.write_text(text)
+          if start_marker in text:
+              start = text.find(start_marker)
+              end = text.find(end_marker, start)
+              if end < 0:
+                  raise SystemExit("Could not locate end of old UK fallback block")
+              replacement = '    if region == "GB":\n        data = tikhub.import_product(job.product_url, region="GB")\n    else:\n        data = sociavault.import_product(job.product_url, region=region)\n\n'
+              text = text[:start] + replacement + text[end:]
+          elif 'data = tikhub.import_product(job.product_url, region="GB")' not in text:
+              raise SystemExit("Could not locate old or new UK import block")
 
-          main = Path("backend/main.py")
-          m = main.read_text()
-          old_health = '        "sociavault": bool(cfg.sociavault_api_key),\n        "google_sheet":'
-          new_health = '        "sociavault": bool(cfg.sociavault_api_key),\n        "tikhub": bool(cfg.tikhub_api_key),\n        "google_sheet":'
-          if m.count(old_health) != 1:
-              raise SystemExit(f"Expected health block once, found {m.count(old_health)}")
-          main.write_text(m.replace(old_health, new_health, 1))
+          tasks.write_text(text)
           PY
 
       - name: Syntax check
-        run: python -m py_compile backend/config.py backend/services/tikhub.py backend/tasks.py backend/main.py
+        run: python -m py_compile backend/config.py backend/services/tikhub.py backend/tasks.py
 
       - name: Commit patch
         shell: bash
         run: |
+          if git diff --quiet -- backend/tasks.py; then
+            echo "No tasks.py changes needed"
+            exit 0
+          fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add backend/tasks.py backend/main.py
+          git add backend/tasks.py
           git commit -m "Route UK TikTok Shop imports through TikHub"
           git push origin HEAD:main
