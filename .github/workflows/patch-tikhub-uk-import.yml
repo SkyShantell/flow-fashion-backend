@@ -33,38 +33,14 @@ jobs:
               raise SystemExit(f"Expected tasks import once, found {text.count(old_import)}")
           text = text.replace(old_import, new_import, 1)
 
-          old_block = '''    data = None
-    if region == "GB" and job.scanner_row_num:
-        scanner_rec, scanner_error = sheets.scanner_row(job.scanner_row_num)
-        if scanner_rec:
-            product_image = sociavault.normalize_remote_url(scanner_rec.get("Product Image"))
-            product_name = str(scanner_rec.get("Product Name") or job.product_name or "Unknown Product").strip()
-            if product_image:
-                data = {
-                    "product_id": job.product_id or hashlib.sha1(job.product_url.encode()).hexdigest()[:12],
-                    "product_name": product_name,
-                    "sociavault_region": "GB",
-                    "listing_images": [product_image],
-                    "review_images": [],
-                    "selected_refs": [product_image],
-                    "focus": sociavault.classify_focus(product_name),
-                }
-
-    if data is None:
-        if region == "GB":
-            raise RuntimeError(
-                "UK TikTok Shop is not supported by SociaVault yet. For UK products, import from the Creator Scanner or Momentum Sniper queue so Flow Fashion can use the product data/image already captured there."
-            )
-        data = sociavault.import_product(job.product_url, region=region)
-'''
-          new_block = '''    if region == "GB":
-        data = tikhub.import_product(job.product_url, region="GB")
-    else:
-        data = sociavault.import_product(job.product_url, region=region)
-'''
-          if text.count(old_block) != 1:
-              raise SystemExit(f"Expected old UK fallback block once, found {text.count(old_block)}")
-          text = text.replace(old_block, new_block, 1)
+          start_marker = '    data = None\n    if region == "GB" and job.scanner_row_num:'
+          end_marker = '    job.sociavault_region = str(data.get("sociavault_region") or region)'
+          start = text.find(start_marker)
+          end = text.find(end_marker, start)
+          if start < 0 or end < 0:
+              raise SystemExit("Could not locate old UK scanner fallback block")
+          replacement = '    if region == "GB":\n        data = tikhub.import_product(job.product_url, region="GB")\n    else:\n        data = sociavault.import_product(job.product_url, region=region)\n\n'
+          text = text[:start] + replacement + text[end:]
           tasks.write_text(text)
 
           main = Path("backend/main.py")
