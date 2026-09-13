@@ -1,0 +1,57 @@
+name: Patch UK Sniper Import Fallback
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/patch-uk-sniper-import.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Bypass SociaVault for UK scanner imports
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{path}: expected one match, found {count}: {old[:160]!r}")
+              p.write_text(text.replace(old, new, 1))
+
+          replace_once(
+              "backend/services/sheets.py",
+              '''def mark_scanner_rows(row_nums: list[int], status: str, batch_id: str = "") -> str:\n''',
+              '''def scanner_row(row_num: int) -> tuple[dict | None, str]:\n    try:\n        row_num = int(row_num or 0)\n        if row_num < 2:\n            return None, "Invalid scanner row"\n        book, gspread = open_book()\n        ws = book.worksheet(SCANNER_QUEUE_TAB)\n        values = ws.get_all_values()\n        if not values or row_num > len(values):\n            return None, "Scanner row not found"\n        headers = values[0]\n        raw = values[row_num - 1]\n        padded = raw + [""] * max(0, len(headers) - len(raw))\n        rec = dict(zip(headers, padded))\n        rec["_row_num"] = row_num\n        return rec, ""\n    except Exception as exc:\n        return None, str(exc)\n\n\ndef mark_scanner_rows(row_nums: list[int], status: str, batch_id: str = "") -> str:\n'''
+          )
+
+          old = '''    region = str((task.payload or {}).get("region") or job.sociavault_region or settings().sociavault_region or "US").strip().upper()\n    if region == "UK":\n        region = "GB"\n    data = sociavault.import_product(job.product_url, region=region)\n    job.sociavault_region = str(data.get("sociavault_region") or region)\n    job.product_id = data["product_id"]\n    job.product_name = data["product_name"]\n    job.listing_images = data["listing_images"]\n    job.review_images = data["review_images"]\n    job.selected_refs = data["selected_refs"]\n'''
+
+          new = '''    region = str((task.payload or {}).get("region") or job.sociavault_region or settings().sociavault_region or "US").strip().upper()\n    if region == "UK":\n        region = "GB"\n\n    data = None\n    if region == "GB" and job.scanner_row_num:\n        scanner_rec, scanner_error = sheets.scanner_row(job.scanner_row_num)\n        if scanner_rec:\n            product_image = sociavault.normalize_remote_url(scanner_rec.get("Product Image"))\n            product_name = str(scanner_rec.get("Product Name") or job.product_name or "Unknown Product").strip()\n            if product_image:\n                data = {\n                    "product_id": job.product_id or hashlib.sha1(job.product_url.encode()).hexdigest()[:12],\n                    "product_name": product_name,\n                    "sociavault_region": "GB",\n                    "listing_images": [product_image],\n                    "review_images": [],\n                    "selected_refs": [product_image],\n                    "focus": sociavault.classify_focus(product_name),\n                }\n\n    if data is None:\n        if region == "GB":\n            raise RuntimeError(\n                "UK TikTok Shop is not supported by SociaVault yet. For UK products, import from the Creator Scanner or Momentum Sniper queue so Flow Fashion can use the product data/image already captured there."\n            )\n        data = sociavault.import_product(job.product_url, region=region)\n\n    job.sociavault_region = str(data.get("sociavault_region") or region)\n    job.product_id = data["product_id"]\n    job.product_name = data["product_name"]\n    job.listing_images = data["listing_images"]\n    job.review_images = data["review_images"]\n    job.selected_refs = data["selected_refs"]\n'''
+
+          replace_once("backend/tasks.py", old, new)
+          PY
+
+      - name: Syntax check
+        run: python -m py_compile backend/services/sheets.py backend/tasks.py
+
+      - name: Commit patch
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add backend/services/sheets.py backend/tasks.py
+          git commit -m "Use scanner data for UK TikTok Shop imports"
+          git push origin HEAD:main
