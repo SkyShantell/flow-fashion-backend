@@ -1,0 +1,49 @@
+name: Patch TikHub V3 Fallback
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/patch-tikhub-v3-fallback.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Fall back to desktop detail when V3 returns 400
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('backend/services/tikhub.py')
+          text = path.read_text()
+
+          old = '''    product_id = extract_product_id(url)\n    detail = _get(DETAIL_V3, {"product_id": product_id, "region": region_code})\n    product_info = detail.get("productInfo") or detail.get("product_info") or detail\n    if not isinstance(product_info, dict):\n        product_info = detail\n\n    title = _first_text(\n        product_info,\n        ("title", "product_title", "productTitle", "name", "product_name", "productName"),\n        blocked=("seller", "shop", "brand", "category"),\n    ) or "Unknown Product"\n\n    listing_images = _collect_image_urls(product_info, review_mode=False)[:18]\n\n    # TikHub recommends V3 for all regions, but the desktop detail endpoint sometimes\n    # exposes a cleaner product gallery. Only call it when V3 did not yield 2+ photos.\n    if len(listing_images) < 2:\n        try:\n            detail_v1 = _get(\n                DETAIL_V1,\n                {"product_id": product_id, "seller_id": "", "region": region_code},\n            )\n            global_data = detail_v1.get("global_data") or detail_v1.get("globalData") or {}\n            v1_product = (\n                global_data.get("product_info")\n                or global_data.get("productInfo")\n                or detail_v1.get("product_info")\n                or detail_v1.get("productInfo")\n                or {}\n            )\n            if isinstance(v1_product, dict):\n                if title == "Unknown Product":\n                    title = _first_text(\n                        v1_product,\n                        ("title", "product_title", "productTitle", "name", "product_name", "productName"),\n                        blocked=("seller", "shop", "brand", "category"),\n                    ) or title\n                listing_images = _merge_unique(\n                    listing_images,\n                    _collect_image_urls(v1_product, review_mode=False),\n                    limit=18,\n                )\n        except Exception:\n            pass\n'''
+
+          new = '''    product_id = extract_product_id(url)\n\n    # V3 is preferred, but TikHub documents that individual requests can return 400\n    # even with a valid region. If that happens, retrying V3 is already handled by\n    # _get(); after those retries, fall back to the full desktop detail endpoint.\n    detail: dict = {}\n    product_info: dict = {}\n    v3_error = ""\n    try:\n        detail = _get(DETAIL_V3, {"product_id": product_id, "region": region_code})\n        product_info = detail.get("productInfo") or detail.get("product_info") or detail\n        if not isinstance(product_info, dict):\n            product_info = detail if isinstance(detail, dict) else {}\n    except Exception as exc:\n        v3_error = str(exc)\n\n    title = _first_text(\n        product_info,\n        ("title", "product_title", "productTitle", "name", "product_name", "productName"),\n        blocked=("seller", "shop", "brand", "category"),\n    ) or "Unknown Product"\n\n    listing_images = _collect_image_urls(product_info, review_mode=False)[:18]\n\n    # Use V1 whenever V3 failed entirely or did not yield at least two real photos.\n    v1_error = ""\n    if v3_error or len(listing_images) < 2:\n        try:\n            detail_v1 = _get(\n                DETAIL_V1,\n                {"product_id": product_id, "seller_id": "", "region": region_code},\n            )\n            global_data = detail_v1.get("global_data") or detail_v1.get("globalData") or {}\n            v1_product = (\n                global_data.get("product_info")\n                or global_data.get("productInfo")\n                or detail_v1.get("product_info")\n                or detail_v1.get("productInfo")\n                or {}\n            )\n            if isinstance(v1_product, dict):\n                if title == "Unknown Product":\n                    title = _first_text(\n                        v1_product,\n                        ("title", "product_title", "productTitle", "name", "product_name", "productName"),\n                        blocked=("seller", "shop", "brand", "category"),\n                    ) or title\n                listing_images = _merge_unique(\n                    listing_images,\n                    _collect_image_urls(v1_product, review_mode=False),\n                    limit=18,\n                )\n        except Exception as exc:\n            v1_error = str(exc)\n\n    if v3_error and not listing_images:\n        # Keep the useful upstream error if both product-detail routes failed.\n        if v1_error:\n            raise RuntimeError(f"TikHub product detail failed on V3 and V1. V3: {v3_error} | V1: {v1_error}")\n        raise RuntimeError(v3_error)\n'''
+
+          if text.count(old) != 1:
+              raise SystemExit(f'Expected one product-detail block, found {text.count(old)}')
+          path.write_text(text.replace(old, new, 1))
+          PY
+
+      - name: Syntax check
+        run: python -m py_compile backend/services/tikhub.py
+
+      - name: Commit patch
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add backend/services/tikhub.py
+          git commit -m "Fall back when TikHub V3 product detail fails"
+          git push origin HEAD:main
