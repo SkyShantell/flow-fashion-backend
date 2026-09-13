@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Callable
 
+import requests
 from sqlalchemy.orm import Session
 
 from backend.models import Batch, ProductJob, QueueTask
@@ -30,6 +31,47 @@ def _archive_only_after_manual_ffmpeg(db: Session, task: QueueTask) -> None:
     if payload.get("manual_ffmpeg_done"):
         return _ORIGINAL_ARCHIVE_MEDIA(db, task)
     log.info("Raw video ready; waiting for manual FFmpeg text · job=%s", task.job_id)
+
+
+def _download_url(url: str) -> bytes | None:
+    url = str(url or "").strip()
+    if not url:
+        return None
+    try:
+        response = requests.get(url, timeout=120)
+        response.raise_for_status()
+        return response.content or None
+    except Exception:
+        return None
+
+
+def _download_ffmpeg_source(job: ProductJob, payload: dict) -> bytes | None:
+    """Always render from the pre-FFmpeg video so redoes never stack old text."""
+    source_media_id = str(payload.get("ffmpeg_source_media_id") or "").strip()
+    source_url = str(payload.get("ffmpeg_source_url") or "").strip()
+
+    if source_media_id:
+        data, _error = useapi.download_raw_asset(source_media_id)
+        if data:
+            return data
+    data = _download_url(source_url)
+    if data:
+        return data
+
+    # Legacy completed jobs predate source snapshots. Prefer the generation source over
+    # job.video_media_id, because video_media_id may already contain burned-in text.
+    if job.video_source_media_id:
+        data, _error = useapi.download_raw_asset(str(job.video_source_media_id))
+        if data:
+            return data
+    data = _download_url(str(job.video_source_url or ""))
+    if data:
+        return data
+
+    # First-time renders still have the raw/upscaled video as the current final asset.
+    if not payload.get("redo"):
+        return tasks._download_final_video_for_archive(job)
+    return None
 
 
 def run_apply_text_overlay(db: Session, task: QueueTask) -> None:
@@ -67,19 +109,17 @@ def run_apply_text_overlay(db: Session, task: QueueTask) -> None:
         placement = str(payload.get("placement") or "middle").strip()[:20]
 
         log.info(
-            "Manual styled FFmpeg started · job=%s · preset=%s · headline=%s · apple_emoji=%s",
+            "Manual styled FFmpeg started · job=%s · preset=%s · headline=%s · apple_emoji=%s · redo=%s",
             job.id,
             preset,
             headline,
             bool(emoji_prefix_pngs or emoji_suffix_pngs),
+            bool(payload.get("redo")),
         )
-        original_bytes = tasks._download_final_video_for_archive(job)
+        original_bytes = _download_ffmpeg_source(job, payload)
         if not original_bytes:
-            raise RuntimeError("Could not download the returned video for FFmpeg.")
+            raise RuntimeError("Could not download the original pre-FFmpeg video.")
 
-        # Text and emoji are rendered into a transparent PNG layer first. Exact Apple
-        # emoji arrives as PNGs rendered locally by the user's Mac/iPhone/iPad browser.
-        # FFmpeg only composites that finished layer onto the real video.
         final_bytes = render_styled_overlay(
             original_bytes,
             headline=headline,
@@ -102,8 +142,6 @@ def run_apply_text_overlay(db: Session, task: QueueTask) -> None:
         job.video_url = useapi.resolve_asset_url(final_media_id) or None
         job.video_source_email = str(uploaded.get("email") or job.video_source_email or "").strip() or None
         job.video_error = None
-        # `complete` is the durable signal that text was applied. The raw returned video
-        # stays at `video_complete`, so the dashboard knows when to show the manual button.
         job.stage = "complete"
         job.drive_video_id = None
         job.drive_video_url = None
@@ -119,7 +157,6 @@ def run_apply_text_overlay(db: Session, task: QueueTask) -> None:
             "fashion_text_overlay_preset": preset,
             "fashion_text_overlay_emoji_prefix": emoji_prefix,
             "fashion_text_overlay_emoji_suffix": emoji_suffix,
-            # Do not duplicate the large PNG data URLs into the archival metadata fields.
             "fashion_text_overlay_emoji_mode": "browser_system_png" if (emoji_prefix_pngs or emoji_suffix_pngs) else "fallback",
             "fashion_text_overlay_headline_color": headline_color,
             "fashion_text_overlay_subheadline_color": subheadline_color,
@@ -150,11 +187,11 @@ def run_apply_text_overlay(db: Session, task: QueueTask) -> None:
             max_attempts=2,
             allow_duplicate=True,
         )
-        log.info("Manual styled FFmpeg completed · job=%s · media=%s", job.id, final_media_id)
+        log.info("Manual styled FFmpeg completed · job=%s · media=%s · redo=%s", job.id, final_media_id, bool(payload.get("redo")))
     except Exception:
-        # Keep the raw returned video usable if FFmpeg ultimately fails.
         if int(task.attempts or 0) >= int(task.max_attempts or 1):
-            job.stage = "video_complete"
+            # A failed redo must leave the previous successful FFmpeg version available.
+            job.stage = "complete" if payload.get("redo") and job.video_media_id else "video_complete"
             db.add(job)
             db.flush()
         raise
@@ -171,9 +208,6 @@ def install_manual_ffmpeg_handler() -> None:
     if original_enqueue is None or original_archive is None:
         raise RuntimeError("Text overlay handler must be installed before manual FFmpeg mode.")
 
-    # The old text-overlay wrapper hid the raw video and started FFmpeg whenever
-    # archive_media was queued. Restore normal enqueue behavior so the raw video appears
-    # immediately, then gate Drive archiving until the manual FFmpeg task finishes.
     tasks.enqueue_task = original_enqueue
     _ORIGINAL_ARCHIVE_MEDIA = original_archive
     tasks.HANDLERS["archive_media"] = _archive_only_after_manual_ffmpeg
