@@ -1,0 +1,71 @@
+name: Patch Backend Memory Pressure
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/patch-memory-pressure.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Patch lightweight batch reads
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('backend/api.py')
+          text = path.read_text()
+
+          if 'BATCH_VIEW_COLUMNS = (' not in text:
+              text = text.replace(
+                  'from sqlalchemy.orm import Session\n',
+                  'from sqlalchemy.orm import Session, load_only\n',
+                  1,
+              )
+
+              marker = 'FOCUS_VALUES = {"outfit", "shirt", "hoodie", "pants", "shoes", "handbag"}\n'
+              insert = '''FOCUS_VALUES = {"outfit", "shirt", "hoodie", "pants", "shoes", "handbag"}\n\n\n# Read-only dashboard queries must never pull the large base64 avatar column into memory.\nBATCH_VIEW_COLUMNS = (\n    Batch.id, Batch.name, Batch.avatar_name, Batch.flow_account_email, Batch.mode,\n    Batch.scene, Batch.scene_pool, Batch.creator_profile, Batch.video_style,\n    Batch.motion_pool, Batch.auto_approve, Batch.status,\n)\n\n# Only columns that are actually serialized by job_out() or needed for batch counters.\nJOB_VIEW_COLUMNS = (\n    ProductJob.id, ProductJob.batch_id, ProductJob.product_name, ProductJob.product_url,\n    ProductJob.product_id, ProductJob.sociavault_region, ProductJob.focus,\n    ProductJob.scene_override, ProductJob.motion_style_override, ProductJob.listing_images,\n    ProductJob.review_images, ProductJob.selected_refs, ProductJob.editorial_shots,\n    ProductJob.stage, ProductJob.approved, ProductJob.image_status, ProductJob.image_url,\n    ProductJob.video_status, ProductJob.upscale_status, ProductJob.video_url,\n    ProductJob.video_resolution, ProductJob.drive_video_id, ProductJob.drive_video_url,\n    ProductJob.drive_video_download_url, ProductJob.image_error, ProductJob.video_error,\n    ProductJob.upscale_error, ProductJob.drive_error, ProductJob.created_at,\n)\n\n\ndef _batch_view_query(db: Session):\n    return db.query(Batch).options(load_only(*BATCH_VIEW_COLUMNS))\n'''
+              if marker not in text:
+                  raise SystemExit('FOCUS_VALUES marker not found')
+              text = text.replace(marker, insert, 1)
+
+          old_jobs = '    jobs = db.query(ProductJob).filter(ProductJob.batch_id == batch.id).order_by(ProductJob.created_at.asc()).all()'
+          new_jobs = '    jobs = db.query(ProductJob).options(load_only(*JOB_VIEW_COLUMNS)).filter(ProductJob.batch_id == batch.id).order_by(ProductJob.created_at.asc()).all()'
+          if old_jobs in text:
+              text = text.replace(old_jobs, new_jobs, 1)
+
+          old_block = '''@app.get("/batches", dependencies=[Depends(require_api_key)])\ndef list_batches(db: Session = Depends(get_db)):\n    batches = db.query(Batch).order_by(Batch.created_at.desc()).limit(100).all()\n    return [batch_out(b, db) for b in batches]\n\n\n@app.get("/batches/{batch_id}", response_model=BatchOut, dependencies=[Depends(require_api_key)])\ndef get_batch(batch_id: str, db: Session = Depends(get_db)):\n    batch = db.get(Batch, batch_id)\n    if not batch:\n        raise HTTPException(404, "Batch not found")\n    return batch_out(batch, db)\n'''
+
+          new_block = '''@app.get("/batches-lite", dependencies=[Depends(require_api_key)])\ndef list_batches_lite(db: Session = Depends(get_db)):\n    rows = db.query(Batch.id, Batch.name, Batch.mode, Batch.status).order_by(Batch.created_at.desc()).limit(100).all()\n    return [\n        {"id": row.id, "name": row.name, "mode": row.mode or "fashion_tryon", "status": row.status or "open"}\n        for row in rows\n    ]\n\n\n@app.get("/batch-summaries", dependencies=[Depends(require_api_key)])\ndef list_batch_summaries(db: Session = Depends(get_db)):\n    batches = _batch_view_query(db).order_by(Batch.created_at.desc()).limit(100).all()\n    batch_ids = [b.id for b in batches]\n\n    stats = {\n        batch_id: {\n            "products": 0, "images_ready": 0, "approved": 0, "videos_ready": 0,\n            "archived": 0, "failed": 0, "queued_tasks": 0, "running_tasks": 0,\n            "by_stage": {},\n        }\n        for batch_id in batch_ids\n    }\n\n    if batch_ids:\n        rows = db.query(\n            ProductJob.batch_id, ProductJob.stage, ProductJob.image_status,\n            ProductJob.approved, ProductJob.drive_video_id,\n        ).filter(ProductJob.batch_id.in_(batch_ids)).all()\n        for row in rows:\n            item = stats[row.batch_id]\n            stage = str(row.stage or "unknown")\n            item["products"] += 1\n            item["images_ready"] += 1 if row.image_status == "completed" else 0\n            item["approved"] += 1 if row.approved else 0\n            item["videos_ready"] += 1 if stage in {"video_complete", "complete"} else 0\n            item["archived"] += 1 if row.drive_video_id else 0\n            item["failed"] += 1 if stage == "failed" else 0\n            item["by_stage"][stage] = int(item["by_stage"].get(stage, 0)) + 1\n\n        task_rows = db.query(QueueTask.batch_id, QueueTask.status).filter(\n            QueueTask.batch_id.in_(batch_ids),\n            QueueTask.status.in_(["queued", "running"]),\n        ).all()\n        for row in task_rows:\n            if row.batch_id not in stats:\n                continue\n            key = "queued_tasks" if row.status == "queued" else "running_tasks"\n            stats[row.batch_id][key] += 1\n\n    return [\n        {\n            "id": batch.id,\n            "name": batch.name,\n            "avatar_name": batch.avatar_name,\n            "flow_account_email": batch.flow_account_email,\n            "mode": batch.mode or "fashion_tryon",\n            "scene": batch.scene,\n            "scene_pool": _scene_pool(batch),\n            "creator_profile": batch.creator_profile,\n            "video_style": batch.video_style,\n            "motion_pool": _motion_pool(batch),\n            "auto_approve": bool(batch.auto_approve),\n            "status": batch.status or "open",\n            "counts": stats[batch.id],\n            "jobs": [],\n        }\n        for batch in batches\n    ]\n\n\n@app.get("/batches/{batch_id}/lite", dependencies=[Depends(require_api_key)])\ndef get_batch_lite(batch_id: str, db: Session = Depends(get_db)):\n    batch = db.query(Batch.id, Batch.name, Batch.mode, Batch.status).filter(Batch.id == batch_id).first()\n    if not batch:\n        raise HTTPException(404, "Batch not found")\n    jobs = db.query(\n        ProductJob.id, ProductJob.product_name, ProductJob.image_status, ProductJob.approved,\n        ProductJob.video_status, ProductJob.upscale_status, ProductJob.stage,\n        ProductJob.selected_refs, ProductJob.image_url, ProductJob.video_url,\n    ).filter(ProductJob.batch_id == batch_id).order_by(ProductJob.created_at.asc()).all()\n    return {\n        "id": batch.id,\n        "name": batch.name,\n        "mode": batch.mode or "fashion_tryon",\n        "status": batch.status or "open",\n        "jobs": [\n            {\n                "id": row.id,\n                "product_name": row.product_name,\n                "image_status": row.image_status or "pending",\n                "approved": bool(row.approved),\n                "video_status": row.video_status or "pending",\n                "upscale_status": row.upscale_status or "pending",\n                "stage": row.stage or "",\n                "selected_refs": list(row.selected_refs or []),\n                "image_url": row.image_url,\n                "video_url": row.video_url,\n            }\n            for row in jobs\n        ],\n    }\n\n\n@app.get("/batches", dependencies=[Depends(require_api_key)])\ndef list_batches(db: Session = Depends(get_db)):\n    batches = _batch_view_query(db).order_by(Batch.created_at.desc()).limit(100).all()\n    return [batch_out(b, db) for b in batches]\n\n\n@app.get("/batches/{batch_id}", response_model=BatchOut, dependencies=[Depends(require_api_key)])\ndef get_batch(batch_id: str, db: Session = Depends(get_db)):\n    batch = _batch_view_query(db).filter(Batch.id == batch_id).first()\n    if not batch:\n        raise HTTPException(404, "Batch not found")\n    return batch_out(batch, db)\n'''
+
+          if '@app.get("/batch-summaries"' not in text:
+              if old_block not in text:
+                  raise SystemExit('list/get batches block not found')
+              text = text.replace(old_block, new_block, 1)
+
+          path.write_text(text)
+          PY
+
+      - name: Commit backend patch
+        shell: bash
+        run: |
+          if git diff --quiet -- backend/api.py; then
+            echo "No backend changes needed"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add backend/api.py
+          git commit -m "Reduce dashboard backend memory pressure"
+          git push origin HEAD:main
