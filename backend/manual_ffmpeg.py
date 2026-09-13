@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 from typing import Callable
 
-import requests
 from sqlalchemy.orm import Session
 
 from backend.models import Batch, ProductJob, QueueTask
@@ -33,40 +32,29 @@ def _archive_only_after_manual_ffmpeg(db: Session, task: QueueTask) -> None:
     log.info("Raw video ready; waiting for manual FFmpeg text · job=%s", task.job_id)
 
 
-def _download_url(url: str) -> bytes | None:
-    url = str(url or "").strip()
-    if not url:
-        return None
-    try:
-        response = requests.get(url, timeout=120)
-        response.raise_for_status()
-        return response.content or None
-    except Exception:
-        return None
-
-
 def _download_ffmpeg_source(job: ProductJob, payload: dict) -> bytes | None:
     """Always render from the pre-FFmpeg video so redoes never stack old text."""
     source_media_id = str(payload.get("ffmpeg_source_media_id") or "").strip()
     source_url = str(payload.get("ffmpeg_source_url") or "").strip()
-
-    if source_media_id:
-        data, _error = useapi.download_raw_asset(source_media_id)
-        if data:
-            return data
-    data = _download_url(source_url)
-    if data:
-        return data
+    if source_media_id or source_url:
+        try:
+            data, _mime = tasks._asset_bytes(source_media_id, source_url)
+            if data:
+                return data
+        except Exception:
+            pass
 
     # Legacy completed jobs predate source snapshots. Prefer the generation source over
     # job.video_media_id, because video_media_id may already contain burned-in text.
-    if job.video_source_media_id:
-        data, _error = useapi.download_raw_asset(str(job.video_source_media_id))
-        if data:
-            return data
-    data = _download_url(str(job.video_source_url or ""))
-    if data:
-        return data
+    legacy_media_id = str(job.video_source_media_id or "").strip()
+    legacy_url = str(job.video_source_url or "").strip()
+    if legacy_media_id or legacy_url:
+        try:
+            data, _mime = tasks._asset_bytes(legacy_media_id, legacy_url)
+            if data:
+                return data
+        except Exception:
+            pass
 
     # First-time renders still have the raw/upscaled video as the current final asset.
     if not payload.get("redo"):
