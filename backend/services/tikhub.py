@@ -11,6 +11,7 @@ from backend.services.sociavault import classify_focus, normalize_remote_url
 
 TIKHUB_BASE = "https://api.tikhub.io/api/v1/tiktok/shop/web"
 DETAIL_V3 = f"{TIKHUB_BASE}/fetch_product_detail_v3"
+DETAIL_V1 = f"{TIKHUB_BASE}/fetch_product_detail"
 REVIEWS_V2 = f"{TIKHUB_BASE}/fetch_product_reviews_v2"
 
 
@@ -107,35 +108,69 @@ def _first_text(node, keys: tuple[str, ...], blocked: tuple[str, ...] = ()) -> s
     return ""
 
 
-def _collect_image_urls(node, *, review_mode: bool = False, max_depth: int = 10) -> list[str]:
-    urls: list[str] = []
-    seen: set[str] = set()
+def _collect_image_urls(node, *, review_mode: bool = False, max_depth: int = 12) -> list[str]:
+    """Collect real product/review images, ranking product galleries above UI artwork."""
+    scored: dict[str, tuple[int, int]] = {}
+    order = 0
 
-    def add(value) -> None:
+    def add(value, path: tuple[str, ...]) -> None:
+        nonlocal order
         url = normalize_remote_url(value)
-        if not url or url in seen:
+        if not url:
             return
-        low = url.lower()
-        if any(x in low for x in ("avatar", "profile", "shop_logo", "seller_logo")):
+        low_url = url.lower()
+        path_text = " ".join(path).lower()
+        combined = f"{path_text} {low_url}"
+
+        # TikHub productInfo also contains UI artwork. Never allow that to become a product ref.
+        if any(x in combined for x in (
+            "avatar", "profile", "seller_logo", "shop_logo", "shopinfo", "shop_info",
+            "favicon", "qrcode", "qr_code", "sprite", "placeholder", "tiktok-logo",
+            "tiktok_logo", "app_icon", "share_icon",
+        )):
             return
-        seen.add(url)
-        urls.append(url)
+        if any(x in path_text for x in ("seller", "shop logo", "shop_logo", "logo", "icon")):
+            return
+        if not any(x in low_url for x in (".jpg", ".jpeg", ".png", ".webp", "image", "img", "byteimg", "ibytedtos", "ibyteimg")):
+            return
+
+        strong = (
+            "main_image", "mainimage", "main_images", "mainimages",
+            "product_image", "productimage", "product_images", "productimages",
+            "sku_image", "skuimage", "sku_images", "skuimages",
+            "image_list", "imagelist", "images", "image_urls", "imageurls",
+        )
+        score = 0
+        if any(x in path_text for x in strong):
+            score += 100
+        elif any(x in path_text for x in ("image", "img", "photo", "picture", "media", "cover", "thumb")):
+            score += 45
+        else:
+            return
+
+        if review_mode:
+            if "review" in path_text or "comment" in path_text:
+                score += 80
+        else:
+            if "product" in path_text or "sku" in path_text:
+                score += 50
+            if "cover" in path_text:
+                score += 15
+        if any(x in low_url for x in ("byteimg", "ibytedtos", "ibyteimg")):
+            score += 10
+
+        order += 1
+        previous = scored.get(url)
+        if previous is None or score > previous[0]:
+            scored[url] = (score, order)
 
     def walk(value, path: tuple[str, ...] = (), depth: int = 0) -> None:
         if depth > max_depth:
             return
-        joined = " ".join(path).lower()
-        if any(x in joined for x in ("avatar", "profile", "seller", "shopinfo", "shop_info", "logo", "icon")):
-            return
         if isinstance(value, str):
-            if review_mode:
-                allowed = any(x in joined for x in ("image", "img", "photo", "picture", "media", "cover", "thumb"))
-            else:
-                allowed = any(x in joined for x in ("image", "img", "photo", "picture", "cover", "thumb"))
-            if allowed and not any(x in joined for x in ("video", "play", "aweme")):
-                add(value)
+            add(value, path)
             return
-        if isinstance(value, list):
+        if isinstance(value, (list, tuple)):
             for item in value:
                 walk(item, path, depth + 1)
             return
@@ -144,7 +179,21 @@ def _collect_image_urls(node, *, review_mode: bool = False, max_depth: int = 10)
                 walk(child, path + (str(key).lower(),), depth + 1)
 
     walk(node)
-    return urls
+    ranked = sorted(scored.items(), key=lambda item: (-item[1][0], item[1][1]))
+    return [url for url, _meta in ranked]
+
+
+def _merge_unique(*groups: list[str], limit: int = 30) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for group in groups:
+        for value in group:
+            if value and value not in seen:
+                seen.add(value)
+                out.append(value)
+                if len(out) >= limit:
+                    return out
+    return out
 
 
 def import_product(url: str, region: str = "GB") -> dict:
@@ -168,6 +217,37 @@ def import_product(url: str, region: str = "GB") -> dict:
 
     listing_images = _collect_image_urls(product_info, review_mode=False)[:18]
 
+    # TikHub recommends V3 for all regions, but the desktop detail endpoint sometimes
+    # exposes a cleaner product gallery. Only call it when V3 did not yield 2+ photos.
+    if len(listing_images) < 2:
+        try:
+            detail_v1 = _get(
+                DETAIL_V1,
+                {"product_id": product_id, "seller_id": "", "region": region_code},
+            )
+            global_data = detail_v1.get("global_data") or detail_v1.get("globalData") or {}
+            v1_product = (
+                global_data.get("product_info")
+                or global_data.get("productInfo")
+                or detail_v1.get("product_info")
+                or detail_v1.get("productInfo")
+                or {}
+            )
+            if isinstance(v1_product, dict):
+                if title == "Unknown Product":
+                    title = _first_text(
+                        v1_product,
+                        ("title", "product_title", "productTitle", "name", "product_name", "productName"),
+                        blocked=("seller", "shop", "brand", "category"),
+                    ) or title
+                listing_images = _merge_unique(
+                    listing_images,
+                    _collect_image_urls(v1_product, review_mode=False),
+                    limit=18,
+                )
+        except Exception:
+            pass
+
     review_images: list[str] = []
     try:
         review_data = _get(
@@ -184,17 +264,18 @@ def import_product(url: str, region: str = "GB") -> dict:
         review_root = review_data.get("reviews") or review_data.get("review_list") or review_data
         review_images = _collect_image_urls(review_root, review_mode=True)[:24]
     except Exception:
-        # Listing images are enough to continue if TikHub review media is temporarily unavailable.
         review_images = []
 
+    listing_images = _merge_unique(listing_images, limit=18)
     listing_set = set(listing_images)
-    review_images = [u for u in review_images if u not in listing_set]
+    review_images = [u for u in _merge_unique(review_images, limit=24) if u not in listing_set]
+
     if not listing_images and not review_images:
         raise RuntimeError("TikHub returned the UK product but no usable product images.")
 
-    selected_refs = (listing_images[:2] + review_images[:1])[: settings().max_product_refs]
+    selected_refs = _merge_unique(listing_images[:2], review_images[:1], limit=settings().max_product_refs)
     if not selected_refs:
-        selected_refs = (listing_images + review_images)[:3]
+        selected_refs = _merge_unique(listing_images, review_images, limit=3)
 
     return {
         "product_id": product_id,
