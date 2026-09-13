@@ -129,9 +129,9 @@ def _collect_image_urls(node, *, review_mode: bool = False, max_depth: int = 10)
             return
         if isinstance(value, str):
             if review_mode:
-                allowed = any(x in joined for x in ("image", "img", "photo", "picture", "media", "cover"))
+                allowed = any(x in joined for x in ("image", "img", "photo", "picture", "media", "cover", "thumb"))
             else:
-                allowed = any(x in joined for x in ("image", "img", "picture", "cover", "productinfo", "product_info"))
+                allowed = any(x in joined for x in ("image", "img", "photo", "picture", "cover", "thumb"))
             if allowed and not any(x in joined for x in ("video", "play", "aweme")):
                 add(value)
             return
