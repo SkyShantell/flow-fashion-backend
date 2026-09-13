@@ -32,7 +32,6 @@ jobs:
                   raise SystemExit(f"{path}: expected exactly one match, found {count}: {old[:140]!r}")
               p.write_text(text.replace(old, new, 1))
 
-          # Request/response schemas.
           replace_once(
               "backend/schemas.py",
               'class ImportProductsRequest(BaseModel):\n    links: list[str] = Field(default_factory=list)\n    start_generation: bool = True\n\n\nclass ImportScannerRequest(BaseModel):\n    row_nums: list[int] | None = None\n    max_items: int = 10\n    start_generation: bool = True',
@@ -43,8 +42,6 @@ jobs:
               '    product_id: str | None\n    focus: str | None',
               '    product_id: str | None\n    sociavault_region: str = "US"\n    focus: str | None'
           )
-
-          # Persist the market on each product so retries use the same region.
           replace_once(
               "backend/models.py",
               '    product_url = Column(Text, nullable=False)\n    product_id = Column(String(160), nullable=True, index=True)',
@@ -60,8 +57,6 @@ jobs:
               '        "product_jobs": {\n            "scene_override": "VARCHAR(120)",',
               '        "product_jobs": {\n            "sociavault_region": "VARCHAR(8) DEFAULT \'US\'",\n            "scene_override": "VARCHAR(120)",'
           )
-
-          # SociaVault request uses the chosen market. UK maps to the API's GB region code.
           replace_once(
               "backend/services/sociavault.py",
               'def import_product(url: str) -> dict:\n    cfg = settings()\n    data = sociavault_get(SOCIA_PRODUCT_DETAILS, {"url": url, "get_related_videos": "false", "region": cfg.sociavault_region})',
@@ -77,8 +72,6 @@ jobs:
               '        "product_name": name,\n        "listing_images": listing,',
               '        "product_name": name,\n        "sociavault_region": region_code,\n        "listing_images": listing,'
           )
-
-          # API: expose and persist market; pass it into queued imports.
           replace_once(
               "backend/api.py",
               '        product_id=job.product_id,\n        focus=job.focus,',
@@ -111,11 +104,9 @@ jobs:
           )
           replace_once(
               "backend/api.py",
-              '    enqueue_task(db, task_type, job_id=job.id, batch_id=job.batch_id, priority=15, max_attempts=3, allow_duplicate=True)',
-              '    retry_payload = {"region": str(job.sociavault_region or "US")} if step == "import" else None\n    enqueue_task(db, task_type, job_id=job.id, batch_id=job.batch_id, payload=retry_payload, priority=15, max_attempts=3, allow_duplicate=True)'
+              '    db.add(job)\n    db.flush()\n    enqueue_task(db, task_type, job_id=job.id, batch_id=job.batch_id, priority=15, max_attempts=3, allow_duplicate=True)\n    db.commit()\n    db.refresh(job)\n    return job_out(job)',
+              '    db.add(job)\n    db.flush()\n    retry_payload = {"region": str(job.sociavault_region or "US")} if step == "import" else None\n    enqueue_task(db, task_type, job_id=job.id, batch_id=job.batch_id, payload=retry_payload, priority=15, max_attempts=3, allow_duplicate=True)\n    db.commit()\n    db.refresh(job)\n    return job_out(job)'
           )
-
-          # Worker imports with the market attached to the product job/task.
           replace_once(
               "backend/tasks.py",
               '    data = sociavault.import_product(job.product_url)\n    job.product_id = data["product_id"]',
