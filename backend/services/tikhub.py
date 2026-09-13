@@ -204,10 +204,20 @@ def import_product(url: str, region: str = "GB") -> dict:
         raise RuntimeError("TikHub importer is currently reserved for UK / GB products.")
 
     product_id = extract_product_id(url)
-    detail = _get(DETAIL_V3, {"product_id": product_id, "region": region_code})
-    product_info = detail.get("productInfo") or detail.get("product_info") or detail
-    if not isinstance(product_info, dict):
-        product_info = detail
+
+    # V3 is preferred, but TikHub documents that individual requests can return 400
+    # even with a valid region. If that happens, retrying V3 is already handled by
+    # _get(); after those retries, fall back to the full desktop detail endpoint.
+    detail: dict = {}
+    product_info: dict = {}
+    v3_error = ""
+    try:
+        detail = _get(DETAIL_V3, {"product_id": product_id, "region": region_code})
+        product_info = detail.get("productInfo") or detail.get("product_info") or detail
+        if not isinstance(product_info, dict):
+            product_info = detail if isinstance(detail, dict) else {}
+    except Exception as exc:
+        v3_error = str(exc)
 
     title = _first_text(
         product_info,
@@ -217,9 +227,9 @@ def import_product(url: str, region: str = "GB") -> dict:
 
     listing_images = _collect_image_urls(product_info, review_mode=False)[:18]
 
-    # TikHub recommends V3 for all regions, but the desktop detail endpoint sometimes
-    # exposes a cleaner product gallery. Only call it when V3 did not yield 2+ photos.
-    if len(listing_images) < 2:
+    # Use V1 whenever V3 failed entirely or did not yield at least two real photos.
+    v1_error = ""
+    if v3_error or len(listing_images) < 2:
         try:
             detail_v1 = _get(
                 DETAIL_V1,
@@ -245,8 +255,14 @@ def import_product(url: str, region: str = "GB") -> dict:
                     _collect_image_urls(v1_product, review_mode=False),
                     limit=18,
                 )
-        except Exception:
-            pass
+        except Exception as exc:
+            v1_error = str(exc)
+
+    if v3_error and not listing_images:
+        # Keep the useful upstream error if both product-detail routes failed.
+        if v1_error:
+            raise RuntimeError(f"TikHub product detail failed on V3 and V1. V3: {v3_error} | V1: {v1_error}")
+        raise RuntimeError(v3_error)
 
     review_images: list[str] = []
     try:
