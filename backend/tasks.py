@@ -406,7 +406,31 @@ def run_import_product(db: Session, task: QueueTask) -> None:
     region = str((task.payload or {}).get("region") or job.sociavault_region or settings().sociavault_region or "US").strip().upper()
     if region == "UK":
         region = "GB"
-    data = sociavault.import_product(job.product_url, region=region)
+
+    data = None
+    if region == "GB" and job.scanner_row_num:
+        scanner_rec, scanner_error = sheets.scanner_row(job.scanner_row_num)
+        if scanner_rec:
+            product_image = sociavault.normalize_remote_url(scanner_rec.get("Product Image"))
+            product_name = str(scanner_rec.get("Product Name") or job.product_name or "Unknown Product").strip()
+            if product_image:
+                data = {
+                    "product_id": job.product_id or hashlib.sha1(job.product_url.encode()).hexdigest()[:12],
+                    "product_name": product_name,
+                    "sociavault_region": "GB",
+                    "listing_images": [product_image],
+                    "review_images": [],
+                    "selected_refs": [product_image],
+                    "focus": sociavault.classify_focus(product_name),
+                }
+
+    if data is None:
+        if region == "GB":
+            raise RuntimeError(
+                "UK TikTok Shop is not supported by SociaVault yet. For UK products, import from the Creator Scanner or Momentum Sniper queue so Flow Fashion can use the product data/image already captured there."
+            )
+        data = sociavault.import_product(job.product_url, region=region)
+
     job.sociavault_region = str(data.get("sociavault_region") or region)
     job.product_id = data["product_id"]
     job.product_name = data["product_name"]

@@ -71,6 +71,26 @@ def scanner_pending() -> tuple[list[dict], str]:
         return [], str(exc)
 
 
+def scanner_row(row_num: int) -> tuple[dict | None, str]:
+    try:
+        row_num = int(row_num or 0)
+        if row_num < 2:
+            return None, "Invalid scanner row"
+        book, gspread = open_book()
+        ws = book.worksheet(SCANNER_QUEUE_TAB)
+        values = ws.get_all_values()
+        if not values or row_num > len(values):
+            return None, "Scanner row not found"
+        headers = values[0]
+        raw = values[row_num - 1]
+        padded = raw + [""] * max(0, len(headers) - len(raw))
+        rec = dict(zip(headers, padded))
+        rec["_row_num"] = row_num
+        return rec, ""
+    except Exception as exc:
+        return None, str(exc)
+
+
 def mark_scanner_rows(row_nums: list[int], status: str, batch_id: str = "") -> str:
     if not row_nums:
         return ""
