@@ -130,6 +130,40 @@ def _cached_apple_pngs(db: Session, tokens: list[str]) -> tuple[list[str], list[
     return pngs, missing
 
 
+def _latest_completed_overlay_payload(db: Session, job: ProductJob) -> dict:
+    current_video_job_id = str(job.video_job_id or "").strip()
+    rows = (
+        db.query(QueueTask)
+        .filter(
+            QueueTask.job_id == job.id,
+            QueueTask.task_type == "apply_text_overlay",
+            QueueTask.status == "done",
+        )
+        .order_by(QueueTask.created_at.desc())
+        .limit(20)
+        .all()
+    )
+    for row in rows:
+        payload = dict(row.payload or {})
+        payload_video_job_id = str(payload.get("video_job_id") or "").strip()
+        if not current_video_job_id or not payload_video_job_id or payload_video_job_id == current_video_job_id:
+            return payload
+    return {}
+
+
+def _active_overlay_task(db: Session, job: ProductJob) -> QueueTask | None:
+    return (
+        db.query(QueueTask)
+        .filter(
+            QueueTask.job_id == job.id,
+            QueueTask.task_type == "apply_text_overlay",
+            QueueTask.status.in_(["queued", "running"]),
+        )
+        .order_by(QueueTask.created_at.desc())
+        .first()
+    )
+
+
 @router.get("/jobs/{job_id}/download-video", dependencies=[Depends(require_api_key)])
 def download_final_video(job_id: str, db: Session = Depends(get_db)):
     job = db.get(ProductJob, job_id)
@@ -173,18 +207,41 @@ def text_overlay_config(job_id: str, db: Session = Depends(get_db)):
         raise HTTPException(404, "Job not found")
     batch = db.get(Batch, job.batch_id)
     shoe_mode = bool(batch and (batch.mode or "fashion_tryon") == "shoe_showcase")
+    previous = _latest_completed_overlay_payload(db, job)
     return {
-        "headline": caption_for_job(job),
-        "subheadline": "",
-        "preset": "luxury_serif" if shoe_mode else "clean_social",
-        "emoji_prefix": "",
-        "emoji_suffix": "",
-        "headline_color": "white",
-        "subheadline_color": "white",
-        "placement": "middle",
+        "headline": str(previous.get("headline") or caption_for_job(job)),
+        "subheadline": str(previous.get("subheadline") or ""),
+        "preset": str(previous.get("preset") or ("luxury_serif" if shoe_mode else "clean_social")),
+        "emoji_prefix": str(previous.get("emoji_prefix") or ""),
+        "emoji_suffix": str(previous.get("emoji_suffix") or ""),
+        "headline_color": str(previous.get("headline_color") or "white"),
+        "subheadline_color": str(previous.get("subheadline_color") or "white"),
+        "placement": str(previous.get("placement") or "middle"),
         **overlay_options(),
         "emoji_mode": "server_apple_cache",
+        "is_redo": bool(previous),
     }
+
+
+@router.post("/jobs/{job_id}/redo-text-overlay", dependencies=[Depends(require_api_key)])
+def redo_text_overlay(job_id: str, db: Session = Depends(get_db)):
+    job = db.get(ProductJob, job_id)
+    if not job:
+        raise HTTPException(404, "Job not found")
+    if str(job.video_status or "").lower() != "completed":
+        raise HTTPException(409, "The main video is not complete")
+    if str(job.stage or "") != "complete":
+        raise HTTPException(409, "FFmpeg can only be redone after a completed text render")
+    active = _active_overlay_task(db, job)
+    if active:
+        raise HTTPException(409, "FFmpeg is already processing this video")
+
+    # Keep the previous successful final asset in place until the redo succeeds. We only
+    # reopen the styling stage; the next apply task will render from the saved raw source.
+    job.stage = "video_complete"
+    db.add(job)
+    db.commit()
+    return {"ok": True, "status": "ready", "job_id": job.id}
 
 
 @router.post("/jobs/{job_id}/apply-text-overlay", dependencies=[Depends(require_api_key)])
@@ -200,20 +257,11 @@ def apply_text_overlay(
     if str(job.video_status or "").lower() != "completed":
         raise HTTPException(409, "Wait for the main video to finish first")
     if str(job.stage or "") == "complete":
-        raise HTTPException(409, "FFmpeg text has already been applied to this video")
+        raise HTTPException(409, "Use Redo FFmpeg to reopen the completed overlay")
     if str(job.stage or "") not in {"video_complete", "finalizing_text"}:
         raise HTTPException(409, "This video is not ready for FFmpeg yet")
 
-    active = (
-        db.query(QueueTask)
-        .filter(
-            QueueTask.job_id == job.id,
-            QueueTask.task_type == "apply_text_overlay",
-            QueueTask.status.in_(["queued", "running"]),
-        )
-        .order_by(QueueTask.created_at.desc())
-        .first()
-    )
+    active = _active_overlay_task(db, job)
     if active:
         return {
             "ok": True,
@@ -222,6 +270,8 @@ def apply_text_overlay(
             "task_id": active.id,
         }
 
+    previous = _latest_completed_overlay_payload(db, job)
+    redo = bool(previous)
     request = req or ApplyTextOverlayRequest()
     headline = " ".join(str(request.headline or caption_for_job(job)).split()).strip()[:120]
     subheadline = " ".join(str(request.subheadline or "").split()).strip()[:120]
@@ -235,7 +285,6 @@ def apply_text_overlay(
     if re.search(r"Macintosh|Mac OS X|iPhone|iPad|iPod", user_agent, re.IGNORECASE):
         source = "apple_browser"
 
-    # Apple devices seed/update the permanent server cache. Windows never overwrites it.
     if source == "apple_browser":
         _cache_apple_assets(db, prefix_tokens, list(request.emoji_prefix_pngs or []))
         _cache_apple_assets(db, suffix_tokens, list(request.emoji_suffix_pngs or []))
@@ -250,6 +299,15 @@ def apply_text_overlay(
             f"Apple emoji asset not installed for: {preview}. Open Style + FFmpeg once on a Mac to add it, then the Windows VA can use it.",
         )
 
+    # Snapshot the pre-FFmpeg source on the first render. Every redo reuses that snapshot,
+    # so changing the caption/style never burns new text on top of old text.
+    if redo:
+        ffmpeg_source_media_id = str(previous.get("ffmpeg_source_media_id") or job.video_source_media_id or "").strip()
+        ffmpeg_source_url = str(previous.get("ffmpeg_source_url") or job.video_source_url or "").strip()
+    else:
+        ffmpeg_source_media_id = str(job.video_media_id or job.video_source_media_id or "").strip()
+        ffmpeg_source_url = str(job.video_url or job.video_source_url or "").strip()
+
     job.stage = "finalizing_text"
     db.add(job)
     db.flush()
@@ -260,6 +318,9 @@ def apply_text_overlay(
         batch_id=job.batch_id,
         payload={
             "video_job_id": str(job.video_job_id or ""),
+            "redo": redo,
+            "ffmpeg_source_media_id": ffmpeg_source_media_id,
+            "ffmpeg_source_url": ffmpeg_source_url,
             "headline": headline,
             "subheadline": subheadline,
             "preset": str(request.preset or "luxury_serif")[:40],
@@ -280,6 +341,7 @@ def apply_text_overlay(
         "ok": True,
         "status": "queued",
         "caption": headline,
+        "redo": redo,
         "emoji_mode": "server_apple_cache" if (prefix_tokens or suffix_tokens) else "none",
         "task_id": task.id,
     }
@@ -298,7 +360,7 @@ def video_provider_health():
         "kling_audio": False,
         "automatic_fallback": False,
         "fashion_text_overlay": True,
-        "ffmpeg_text_mode": "manual_styled",
+        "ffmpeg_text_mode": "manual_styled_redo",
         "ffmpeg_color_emoji": True,
         "ffmpeg_apple_emoji": "persistent server cache seeded from Apple browser",
     }
