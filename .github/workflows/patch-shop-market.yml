@@ -1,0 +1,136 @@
+name: Patch Flow Fashion Shop Market
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/patch-shop-market.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Add US and UK SociaVault market support
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{path}: expected exactly one match, found {count}: {old[:140]!r}")
+              p.write_text(text.replace(old, new, 1))
+
+          # Request/response schemas.
+          replace_once(
+              "backend/schemas.py",
+              'class ImportProductsRequest(BaseModel):\n    links: list[str] = Field(default_factory=list)\n    start_generation: bool = True\n\n\nclass ImportScannerRequest(BaseModel):\n    row_nums: list[int] | None = None\n    max_items: int = 10\n    start_generation: bool = True',
+              'class ImportProductsRequest(BaseModel):\n    links: list[str] = Field(default_factory=list)\n    start_generation: bool = True\n    region: str = "US"\n\n\nclass ImportScannerRequest(BaseModel):\n    row_nums: list[int] | None = None\n    max_items: int = 10\n    start_generation: bool = True\n    region: str = "US"'
+          )
+          replace_once(
+              "backend/schemas.py",
+              '    product_id: str | None\n    focus: str | None',
+              '    product_id: str | None\n    sociavault_region: str = "US"\n    focus: str | None'
+          )
+
+          # Persist the market on each product so retries use the same region.
+          replace_once(
+              "backend/models.py",
+              '    product_url = Column(Text, nullable=False)\n    product_id = Column(String(160), nullable=True, index=True)',
+              '    product_url = Column(Text, nullable=False)\n    sociavault_region = Column(String(8), default="US")\n    product_id = Column(String(160), nullable=True, index=True)'
+          )
+          replace_once(
+              "backend/db.py",
+              '            "ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS scene_override VARCHAR(120)",',
+              '            "ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS sociavault_region VARCHAR(8) DEFAULT \'US\'",\n            "ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS scene_override VARCHAR(120)",'
+          )
+          replace_once(
+              "backend/db.py",
+              '        "product_jobs": {\n            "scene_override": "VARCHAR(120)",',
+              '        "product_jobs": {\n            "sociavault_region": "VARCHAR(8) DEFAULT \'US\'",\n            "scene_override": "VARCHAR(120)",'
+          )
+
+          # SociaVault request uses the chosen market. UK maps to the API's GB region code.
+          replace_once(
+              "backend/services/sociavault.py",
+              'def import_product(url: str) -> dict:\n    cfg = settings()\n    data = sociavault_get(SOCIA_PRODUCT_DETAILS, {"url": url, "get_related_videos": "false", "region": cfg.sociavault_region})',
+              'def import_product(url: str, region: str | None = None) -> dict:\n    cfg = settings()\n    region_code = str(region or cfg.sociavault_region or "US").strip().upper()\n    if region_code == "UK":\n        region_code = "GB"\n    if region_code not in {"US", "GB"}:\n        raise RuntimeError("SociaVault market must be US or UK.")\n    data = sociavault_get(SOCIA_PRODUCT_DETAILS, {"url": url, "get_related_videos": "false", "region": region_code})'
+          )
+          replace_once(
+              "backend/services/sociavault.py",
+              '            review_data = sociavault_get(SOCIA_PRODUCT_REVIEWS, {"product_id": product_id, "page": 1})',
+              '            review_data = sociavault_get(SOCIA_PRODUCT_REVIEWS, {"product_id": product_id, "page": 1, "region": region_code})'
+          )
+          replace_once(
+              "backend/services/sociavault.py",
+              '        "product_name": name,\n        "listing_images": listing,',
+              '        "product_name": name,\n        "sociavault_region": region_code,\n        "listing_images": listing,'
+          )
+
+          # API: expose and persist market; pass it into queued imports.
+          replace_once(
+              "backend/api.py",
+              '        product_id=job.product_id,\n        focus=job.focus,',
+              '        product_id=job.product_id,\n        sociavault_region=str(job.sociavault_region or "US"),\n        focus=job.focus,'
+          )
+          replace_once(
+              "backend/api.py",
+              '    if not links:\n        raise HTTPException(400, "No product links supplied")\n\n    existing_jobs =',
+              '    if not links:\n        raise HTTPException(400, "No product links supplied")\n    region = str(req.region or "US").strip().upper()\n    if region == "UK":\n        region = "GB"\n    if region not in {"US", "GB"}:\n        raise HTTPException(400, "Shop market must be US or UK")\n\n    existing_jobs ='
+          )
+          replace_once(
+              "backend/api.py",
+              '        job = ProductJob(batch_id=batch.id, product_url=link, stage="pending_import", scene_override=assigned_scene, motion_style_override=assigned_motion)\n        db.add(job)\n        db.flush()\n        enqueue_task(db, "import_product", job_id=job.id, batch_id=batch.id, payload={"start_generation": req.start_generation}, priority=10, max_attempts=3)',
+              '        job = ProductJob(batch_id=batch.id, product_url=link, sociavault_region=region, stage="pending_import", scene_override=assigned_scene, motion_style_override=assigned_motion)\n        db.add(job)\n        db.flush()\n        enqueue_task(db, "import_product", job_id=job.id, batch_id=batch.id, payload={"start_generation": req.start_generation, "region": region}, priority=10, max_attempts=3)'
+          )
+          replace_once(
+              "backend/api.py",
+              '    if not selected:\n        raise HTTPException(400, "No pending Scanner Queue rows selected")\n\n    row_nums =',
+              '    if not selected:\n        raise HTTPException(400, "No pending Scanner Queue rows selected")\n    region = str(req.region or "US").strip().upper()\n    if region == "UK":\n        region = "GB"\n    if region not in {"US", "GB"}:\n        raise HTTPException(400, "Shop market must be US or UK")\n\n    row_nums ='
+          )
+          replace_once(
+              "backend/api.py",
+              '            batch_id=batch.id,\n            product_url=link,\n            scene_override=assigned_scene,',
+              '            batch_id=batch.id,\n            product_url=link,\n            sociavault_region=region,\n            scene_override=assigned_scene,'
+          )
+          replace_once(
+              "backend/api.py",
+              '        enqueue_task(db, "import_product", job_id=job.id, batch_id=batch.id, payload={"start_generation": req.start_generation}, priority=10, max_attempts=3)\n    batch.updated_at =',
+              '        enqueue_task(db, "import_product", job_id=job.id, batch_id=batch.id, payload={"start_generation": req.start_generation, "region": region}, priority=10, max_attempts=3)\n    batch.updated_at ='
+          )
+          replace_once(
+              "backend/api.py",
+              '    enqueue_task(db, task_type, job_id=job.id, batch_id=job.batch_id, priority=15, max_attempts=3, allow_duplicate=True)',
+              '    retry_payload = {"region": str(job.sociavault_region or "US")} if step == "import" else None\n    enqueue_task(db, task_type, job_id=job.id, batch_id=job.batch_id, payload=retry_payload, priority=15, max_attempts=3, allow_duplicate=True)'
+          )
+
+          # Worker imports with the market attached to the product job/task.
+          replace_once(
+              "backend/tasks.py",
+              '    data = sociavault.import_product(job.product_url)\n    job.product_id = data["product_id"]',
+              '    region = str((task.payload or {}).get("region") or job.sociavault_region or settings().sociavault_region or "US").strip().upper()\n    if region == "UK":\n        region = "GB"\n    data = sociavault.import_product(job.product_url, region=region)\n    job.sociavault_region = str(data.get("sociavault_region") or region)\n    job.product_id = data["product_id"]'
+          )
+          PY
+
+      - name: Syntax check
+        run: python -m py_compile backend/schemas.py backend/models.py backend/db.py backend/services/sociavault.py backend/api.py backend/tasks.py
+
+      - name: Commit patch
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add backend/schemas.py backend/models.py backend/db.py backend/services/sociavault.py backend/api.py backend/tasks.py
+          git commit -m "Add US UK SociaVault market selection"
+          git push origin HEAD:main
