@@ -26,6 +26,7 @@ class Settings:
     google_flow_email: str = os.getenv("GOOGLE_FLOW_EMAIL", "").strip()
     sociavault_api_key: str = os.getenv("SOCIAVAULT_API_KEY", "").strip()
     sociavault_region: str = os.getenv("SOCIAVAULT_REGION", "US").strip() or "US"
+    tikhub_api_key: str = os.getenv("TIKHUB_API_KEY", "").strip()
 
     # useapi / Flow
     flow_base: str = os.getenv("FLOW_BASE", "https://api.useapi.net/v1/google-flow").strip().rstrip("/")
