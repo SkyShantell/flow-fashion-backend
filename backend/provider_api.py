@@ -97,6 +97,25 @@ def _emoji_tokens(value: str, limit: int = 8) -> list[str]:
     return [token for token in str(value or "").strip().split() if token][:limit]
 
 
+def _looks_like_emoji_token(token: str) -> bool:
+    for char in str(token or ""):
+        code = ord(char)
+        if 0x1F000 <= code <= 0x1FAFF or 0x2600 <= code <= 0x27BF:
+            return True
+    return False
+
+
+def _extract_edge_emojis(headline: str, prefix: str, suffix: str) -> tuple[str, str, str]:
+    parts = str(headline or "").strip().split()
+    prefix = str(prefix or "").strip()
+    suffix = str(suffix or "").strip()
+    if len(parts) > 1 and not prefix and _looks_like_emoji_token(parts[0]):
+        prefix = parts.pop(0)
+    if len(parts) > 1 and not suffix and _looks_like_emoji_token(parts[-1]):
+        suffix = parts.pop()
+    return " ".join(parts), prefix, suffix
+
+
 def _cache_apple_assets(db: Session, tokens: list[str], pngs: list[str]) -> int:
     safe_pngs = _safe_emoji_pngs(pngs, limit=max(1, len(tokens)))
     saved = 0
@@ -275,11 +294,16 @@ def apply_text_overlay(
     request = req or ApplyTextOverlayRequest()
     headline = " ".join(str(request.headline or caption_for_job(job)).split()).strip()[:120]
     subheadline = " ".join(str(request.subheadline or "").split()).strip()[:120]
+    headline, emoji_prefix, emoji_suffix = _extract_edge_emojis(
+        headline,
+        str(request.emoji_prefix or "")[:80],
+        str(request.emoji_suffix or "")[:80],
+    )
     if not headline and not subheadline:
         raise HTTPException(400, "Add at least one line of text")
 
-    prefix_tokens = _emoji_tokens(request.emoji_prefix)
-    suffix_tokens = _emoji_tokens(request.emoji_suffix)
+    prefix_tokens = _emoji_tokens(emoji_prefix)
+    suffix_tokens = _emoji_tokens(emoji_suffix)
     source = str(request.emoji_source or "server_cache").strip().lower()
     user_agent = str(http_request.headers.get("user-agent") or "")
     if re.search(r"Macintosh|Mac OS X|iPhone|iPad|iPod", user_agent, re.IGNORECASE):
@@ -296,7 +320,7 @@ def apply_text_overlay(
         preview = " ".join(missing[:5])
         raise HTTPException(
             409,
-            f"Apple emoji asset not installed for: {preview}. Open Style + FFmpeg once on a Mac to add it, then the Windows VA can use it.",
+            f"Shared Apple emoji library is missing: {preview}. Open Flow Fashion once on a Mac to sync that emoji, then Windows uses the same Apple artwork.",
         )
 
     # Snapshot the pre-FFmpeg source on the first render. Every redo reuses that snapshot,
@@ -324,8 +348,8 @@ def apply_text_overlay(
             "headline": headline,
             "subheadline": subheadline,
             "preset": str(request.preset or "luxury_serif")[:40],
-            "emoji_prefix": str(request.emoji_prefix or "")[:80],
-            "emoji_suffix": str(request.emoji_suffix or "")[:80],
+            "emoji_prefix": emoji_prefix,
+            "emoji_suffix": emoji_suffix,
             "emoji_prefix_pngs": prefix_pngs,
             "emoji_suffix_pngs": suffix_pngs,
             "headline_color": str(request.headline_color or "white")[:30],

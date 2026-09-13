@@ -12,8 +12,9 @@ class SaveAvatarRequest(BaseModel):
 class AvatarOut(BaseModel):
     id: str
     name: str
-    image_b64: str
+    image_b64: str = ""  # legacy compatibility; normal reads use image_url
     image_mime: str
+    image_url: str | None = None
 
 
 class CreateBatchRequest(BaseModel):
@@ -25,6 +26,7 @@ class CreateBatchRequest(BaseModel):
     video_style: str = "Academy — Boss / Calm"
     motion_pool: list[str] = Field(default_factory=list)
     auto_approve: bool = False
+    avatar_id: str | None = None
     avatar_b64: str | None = None
     avatar_mime: str = "image/jpeg"
     avatar_name: str | None = None

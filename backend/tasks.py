@@ -250,15 +250,28 @@ def _same_account(stored: str | None, selected: str | None) -> bool:
 
 def _upload_avatar_if_needed(db: Session, batch: Batch) -> str:
     selected_account = _batch_flow_account(batch)
-    # Automatic can reuse any existing asset. A specific account must own the asset.
-    if batch.avatar_media_id and (not selected_account or _same_account(batch.avatar_source_email, selected_account)):
+    # Automatic can reuse any existing external asset. A pinned account must own the asset.
+    if batch.avatar_media_id:
+        if not selected_account or _same_account(batch.avatar_source_email, selected_account):
+            return batch.avatar_media_id
+        raw, error = useapi.download_raw_asset(str(batch.avatar_media_id))
+        if not raw:
+            raise RuntimeError(error or "Could not recover the externally stored avatar for account migration.")
+        uploaded = useapi.upload_asset(raw, batch.avatar_mime or "image/jpeg", selected_account)
+        batch.avatar_media_id = str(uploaded.get("media_id") or "")
+        batch.avatar_source_email = str(uploaded.get("email") or selected_account or "").strip() or None
+        db.add(batch)
+        db.flush()
         return batch.avatar_media_id
+
+    # Legacy batch fallback. Once uploaded, clear the duplicate base64 from this batch row.
     if not batch.avatar_b64:
         raise RuntimeError("Batch has no avatar image. Add an avatar before generating.")
     raw = base64.b64decode(batch.avatar_b64)
     uploaded = useapi.upload_asset(raw, batch.avatar_mime or "image/jpeg", selected_account)
     batch.avatar_media_id = str(uploaded.get("media_id") or "")
     batch.avatar_source_email = str(uploaded.get("email") or selected_account or "").strip() or None
+    batch.avatar_b64 = None
     db.add(batch)
     db.flush()
     return batch.avatar_media_id
@@ -408,7 +421,39 @@ def run_import_product(db: Session, task: QueueTask) -> None:
         region = "GB"
 
     if region == "GB":
-        data = tikhub.import_product(job.product_url, region="GB")
+        try:
+            data = tikhub.import_product(job.product_url, region="GB")
+        except Exception as tikhub_exc:
+            # Momentum/Scanner already captured a name + cover. Use that as the final UK fallback
+            # instead of failing an otherwise usable product when TikHub rejects this specific ID.
+            scanner_name = str(job.product_name or "Unknown Product").strip() or "Unknown Product"
+            scanner_images = [str(x) for x in _as_list(job.listing_images) if str(x).strip()]
+            if job.scanner_row_num and not scanner_images:
+                scanner_rec, _scanner_error = sheets.scanner_row(int(job.scanner_row_num))
+                if scanner_rec:
+                    scanner_name = str(scanner_rec.get("Product Name") or scanner_name).strip() or scanner_name
+                    scanner_image = sociavault.normalize_remote_url(scanner_rec.get("Product Image"))
+                    if scanner_image:
+                        scanner_images = [scanner_image]
+            if not scanner_images:
+                raise RuntimeError(
+                    "TikHub could not resolve this UK product and the Scanner fallback has no product image. "
+                    + str(tikhub_exc)[:600]
+                )
+            try:
+                product_id = tikhub.extract_product_id(job.product_url)
+            except Exception:
+                product_id = hashlib.sha1(str(job.product_url).encode("utf-8")).hexdigest()[:20]
+            data = {
+                "product_id": product_id,
+                "product_name": scanner_name,
+                "sociavault_region": "GB",
+                "listing_images": scanner_images[:18],
+                "review_images": [],
+                "selected_refs": scanner_images[: settings().max_product_refs],
+                "focus": sociavault.classify_focus(scanner_name),
+                "provider": "scanner_fallback",
+            }
     else:
         data = sociavault.import_product(job.product_url, region=region)
 

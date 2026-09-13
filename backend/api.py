@@ -5,7 +5,7 @@ from collections import Counter
 from datetime import datetime, timezone
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, Header, HTTPException, UploadFile, File, Form
+from fastapi import Depends, FastAPI, Header, HTTPException, UploadFile, File, Form, Response
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session, load_only
 
@@ -29,7 +29,7 @@ from backend.schemas import (
     UpdateJobSettingsRequest,
     UpdateFlowAccountRequest,
 )
-from backend.services import sheets, useapi
+from backend.services import sheets, sociavault, useapi
 from backend.prompts import MOTION_STYLES, SCENES, SHOE_SHOWCASE_MOTION, SHOE_SHOWCASE_SCENE, default_motion_style, video_prompt, shoe_showcase_video_prompt
 from backend.tasks import enqueue_task, run_one_claimed_task
 
@@ -246,10 +246,90 @@ def flow_accounts_status():
 
 
 
+def _avatar_out(row: SavedAvatar) -> AvatarOut:
+    return AvatarOut(
+        id=row.id,
+        name=row.name,
+        image_b64="",
+        image_mime=row.image_mime or "image/jpeg",
+        image_url=f"/avatars/{row.id}/image",
+    )
+
+
+def _externalize_saved_avatar(db: Session, row: SavedAvatar, preferred_email: str = "") -> tuple[str, str]:
+    media_id = str(row.media_id or "").strip()
+    source_email = str(row.source_email or "").strip()
+    if media_id:
+        return media_id, source_email
+    image_b64 = str(row.image_b64 or "").strip()
+    if not image_b64:
+        raise HTTPException(409, "Saved avatar has no recoverable image data")
+    try:
+        raw = base64.b64decode(image_b64, validate=True)
+    except Exception:
+        raise HTTPException(409, "Saved avatar image data is invalid")
+    try:
+        uploaded = useapi.upload_asset(raw, row.image_mime or "image/jpeg", preferred_email)
+    except Exception as exc:
+        raise HTTPException(502, f"Could not store avatar externally: {exc}")
+    row.media_id = str(uploaded.get("media_id") or "").strip() or None
+    row.source_email = str(uploaded.get("email") or preferred_email or "").strip() or None
+    row.image_mime = "image/jpeg"
+    row.image_b64 = ""
+    db.add(row)
+    db.flush()
+    if not row.media_id:
+        raise HTTPException(502, "Avatar storage returned no media ID")
+    return str(row.media_id), str(row.source_email or "")
+
+
 @app.get("/avatars", response_model=list[AvatarOut], dependencies=[Depends(require_api_key)])
 def list_saved_avatars(db: Session = Depends(get_db)):
-    rows = db.query(SavedAvatar).order_by(SavedAvatar.created_at.desc()).all()
-    return [AvatarOut(id=row.id, name=row.name, image_b64=row.image_b64, image_mime=row.image_mime or "image/jpeg") for row in rows]
+    rows = (
+        db.query(SavedAvatar)
+        .options(load_only(SavedAvatar.id, SavedAvatar.name, SavedAvatar.image_mime, SavedAvatar.media_id, SavedAvatar.source_email, SavedAvatar.created_at))
+        .order_by(SavedAvatar.created_at.desc())
+        .all()
+    )
+    return [_avatar_out(row) for row in rows]
+
+
+@app.get("/avatars/{avatar_id}/image", dependencies=[Depends(require_api_key)])
+def saved_avatar_image(avatar_id: str, db: Session = Depends(get_db)):
+    row = db.get(SavedAvatar, avatar_id)
+    if not row:
+        raise HTTPException(404, "Avatar not found")
+
+    media_id = str(row.media_id or "").strip()
+    if media_id:
+        raw, error = useapi.download_raw_asset(media_id)
+        if raw:
+            return Response(content=raw, media_type=row.image_mime or "image/jpeg", headers={"Cache-Control": "private, max-age=3600"})
+        if not row.image_b64:
+            raise HTTPException(502, error or "Stored avatar is temporarily unavailable")
+
+    image_b64 = str(row.image_b64 or "").strip()
+    if not image_b64:
+        raise HTTPException(404, "Avatar image is unavailable")
+    try:
+        raw = base64.b64decode(image_b64, validate=True)
+    except Exception:
+        raise HTTPException(409, "Saved avatar image data is invalid")
+
+    # Lazy migration: viewing an old avatar moves it out of Postgres once, without a bulk memory spike.
+    try:
+        uploaded = useapi.upload_asset(raw, row.image_mime or "image/jpeg", "")
+        row.media_id = str(uploaded.get("media_id") or "").strip() or None
+        row.source_email = str(uploaded.get("email") or "").strip() or None
+        if row.media_id:
+            row.image_b64 = ""
+            row.image_mime = "image/jpeg"
+            db.add(row)
+            db.commit()
+    except Exception:
+        # Preview still works from the legacy bytes; a later request can retry migration.
+        pass
+    return Response(content=raw, media_type=row.image_mime or "image/jpeg", headers={"Cache-Control": "private, max-age=3600"})
 
 
 @app.post("/avatars", response_model=AvatarOut, dependencies=[Depends(require_api_key)])
@@ -259,14 +339,26 @@ def save_avatar(req: SaveAvatarRequest, db: Session = Depends(get_db)):
     if not image_b64:
         raise HTTPException(400, "Avatar image is required")
     try:
-        base64.b64decode(image_b64, validate=True)
+        raw = base64.b64decode(image_b64, validate=True)
     except Exception:
         raise HTTPException(400, "Avatar image is not valid base64")
-    row = SavedAvatar(name=name, image_b64=image_b64, image_mime=req.image_mime or "image/jpeg")
+    try:
+        uploaded = useapi.upload_asset(raw, req.image_mime or "image/jpeg", "")
+    except Exception as exc:
+        raise HTTPException(502, f"Could not store avatar externally: {exc}")
+    row = SavedAvatar(
+        name=name,
+        image_b64="",
+        image_mime="image/jpeg",
+        media_id=str(uploaded.get("media_id") or "").strip() or None,
+        source_email=str(uploaded.get("email") or "").strip() or None,
+    )
+    if not row.media_id:
+        raise HTTPException(502, "Avatar storage returned no media ID")
     db.add(row)
     db.commit()
     db.refresh(row)
-    return AvatarOut(id=row.id, name=row.name, image_b64=row.image_b64, image_mime=row.image_mime or "image/jpeg")
+    return _avatar_out(row)
 
 
 @app.delete("/avatars/{avatar_id}", dependencies=[Depends(require_api_key)])
@@ -282,19 +374,34 @@ def delete_saved_avatar(avatar_id: str, db: Session = Depends(get_db)):
 @app.post("/batches", response_model=BatchOut, dependencies=[Depends(require_api_key)])
 def create_batch(req: CreateBatchRequest, db: Session = Depends(get_db)):
     mode = "shoe_showcase" if str(req.mode or "").strip().lower() == "shoe_showcase" else "fashion_tryon"
+    avatar_b64 = None
+    avatar_media_id = None
+    avatar_source_email = None
+    avatar_mime = req.avatar_mime or "image/jpeg"
+    avatar_name = str(req.avatar_name or "").strip()[:160] or None
+    preferred_email = useapi.normalize_account_email(req.flow_account_email)
+
     if mode == "shoe_showcase":
         requested_scenes = [SHOE_SHOWCASE_SCENE]
         requested_motions = [SHOE_SHOWCASE_MOTION]
         creator_profile = "Male" if str(req.creator_profile or "").lower().startswith("m") else "Female"
-        avatar_b64 = None
     else:
         requested_scenes = [x for x in req.scene_pool if x in SCENES and x != SHOE_SHOWCASE_SCENE] or ([req.scene] if req.scene in SCENES and req.scene != SHOE_SHOWCASE_SCENE else ["Modern apartment mirror"])
         default_motion = default_motion_style(req.creator_profile)
         requested_motions = [x for x in req.motion_pool if x in MOTION_STYLES and x != SHOE_SHOWCASE_MOTION] or ([req.video_style] if req.video_style in MOTION_STYLES and req.video_style != SHOE_SHOWCASE_MOTION else [default_motion])
         creator_profile = req.creator_profile
         avatar_b64 = req.avatar_b64
-        if not avatar_b64:
+        if req.avatar_id:
+            saved = db.get(SavedAvatar, str(req.avatar_id))
+            if not saved:
+                raise HTTPException(404, "Saved avatar not found")
+            avatar_media_id, avatar_source_email = _externalize_saved_avatar(db, saved, preferred_email)
+            avatar_b64 = None
+            avatar_mime = saved.image_mime or "image/jpeg"
+            avatar_name = saved.name
+        if not avatar_b64 and not avatar_media_id:
             raise HTTPException(400, "Fashion Try-On batches require an avatar image")
+
     batch = Batch(
         name=req.name,
         mode=mode,
@@ -305,9 +412,11 @@ def create_batch(req: CreateBatchRequest, db: Session = Depends(get_db)):
         motion_pool=requested_motions,
         auto_approve=req.auto_approve,
         avatar_b64=avatar_b64,
-        avatar_mime=req.avatar_mime or "image/jpeg",
-        avatar_name=(str(req.avatar_name or "").strip()[:160] or None),
-        flow_account_email=(useapi.normalize_account_email(req.flow_account_email) or None),
+        avatar_mime=avatar_mime,
+        avatar_media_id=avatar_media_id,
+        avatar_source_email=avatar_source_email,
+        avatar_name=avatar_name,
+        flow_account_email=(preferred_email or None),
     )
     db.add(batch)
     db.commit()
@@ -592,6 +701,7 @@ def import_from_scanner(batch_id: str, req: ImportScannerRequest, db: Session = 
             continue
         assigned_scene, assigned_motion = _assign_defaults(batch, next_index)
         next_index += 1
+        scanner_image = sociavault.normalize_remote_url(rec.get("Product Image"))
         job = ProductJob(
             batch_id=batch.id,
             product_url=link,
@@ -599,6 +709,8 @@ def import_from_scanner(batch_id: str, req: ImportScannerRequest, db: Session = 
             scene_override=assigned_scene,
             motion_style_override=assigned_motion,
             product_name=str(rec.get("Product Name") or "Unknown Product"),
+            listing_images=[scanner_image] if scanner_image else [],
+            selected_refs=[scanner_image] if scanner_image else [],
             stage="pending_import",
             scanner_row_num=int(rec.get("_row_num") or 0) or None,
             scanner_creators=str(rec.get("Creators") or ""),

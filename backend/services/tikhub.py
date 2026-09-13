@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 import time
 from urllib.parse import parse_qs, urlparse
@@ -13,6 +14,8 @@ TIKHUB_BASE = "https://api.tikhub.io/api/v1/tiktok/shop/web"
 DETAIL_V3 = f"{TIKHUB_BASE}/fetch_product_detail_v3"
 DETAIL_V1 = f"{TIKHUB_BASE}/fetch_product_detail"
 REVIEWS_V2 = f"{TIKHUB_BASE}/fetch_product_reviews_v2"
+
+log = logging.getLogger("flow-tikhub")
 
 
 def extract_product_id(url: str) -> str:
@@ -258,13 +261,8 @@ def import_product(url: str, region: str = "GB") -> dict:
         except Exception as exc:
             v1_error = str(exc)
 
-    if v3_error and not listing_images:
-        # Keep the useful upstream error if both product-detail routes failed.
-        if v1_error:
-            raise RuntimeError(f"TikHub product detail failed on V3 and V1. V3: {v3_error} | V1: {v1_error}")
-        raise RuntimeError(v3_error)
-
     review_images: list[str] = []
+    review_error = ""
     try:
         review_data = _get(
             REVIEWS_V2,
@@ -279,7 +277,8 @@ def import_product(url: str, region: str = "GB") -> dict:
         )
         review_root = review_data.get("reviews") or review_data.get("review_list") or review_data
         review_images = _collect_image_urls(review_root, review_mode=True)[:24]
-    except Exception:
+    except Exception as exc:
+        review_error = str(exc)
         review_images = []
 
     listing_images = _merge_unique(listing_images, limit=18)
@@ -287,7 +286,26 @@ def import_product(url: str, region: str = "GB") -> dict:
     review_images = [u for u in _merge_unique(review_images, limit=24) if u not in listing_set]
 
     if not listing_images and not review_images:
-        raise RuntimeError("TikHub returned the UK product but no usable product images.")
+        if v3_error:
+            log.warning("TikHub V3 failed · product=%s · %s", product_id, v3_error[:500])
+        if v1_error:
+            log.warning("TikHub V1 failed · product=%s · %s", product_id, v1_error[:500])
+        elif v3_error:
+            log.warning("TikHub V1 returned no usable gallery · product=%s", product_id)
+        if review_error:
+            log.warning("TikHub reviews failed · product=%s · %s", product_id, review_error[:500])
+        detail_status = []
+        if v3_error:
+            detail_status.append("V3 failed")
+        if v1_error:
+            detail_status.append("V1 failed")
+        elif v3_error:
+            detail_status.append("V1 had no usable gallery")
+        if review_error:
+            detail_status.append("reviews failed")
+        else:
+            detail_status.append("reviews had no usable photos")
+        raise RuntimeError("TikHub UK lookup exhausted fallbacks: " + "; ".join(detail_status))
 
     selected_refs = _merge_unique(listing_images[:2], review_images[:1], limit=settings().max_product_refs)
     if not selected_refs:

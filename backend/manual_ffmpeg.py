@@ -145,7 +145,7 @@ def run_apply_text_overlay(db: Session, task: QueueTask) -> None:
             "fashion_text_overlay_preset": preset,
             "fashion_text_overlay_emoji_prefix": emoji_prefix,
             "fashion_text_overlay_emoji_suffix": emoji_suffix,
-            "fashion_text_overlay_emoji_mode": "browser_system_png" if (emoji_prefix_pngs or emoji_suffix_pngs) else "fallback",
+            "fashion_text_overlay_emoji_mode": "server_apple_cache" if (emoji_prefix_pngs or emoji_suffix_pngs) else "none",
             "fashion_text_overlay_headline_color": headline_color,
             "fashion_text_overlay_subheadline_color": subheadline_color,
             "fashion_text_overlay_placement": placement,

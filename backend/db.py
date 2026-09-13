@@ -37,6 +37,8 @@ def _add_missing_columns() -> None:
     """
     if not IS_SQLITE:
         statements = [
+            "ALTER TABLE saved_avatars ADD COLUMN IF NOT EXISTS media_id VARCHAR(500)",
+            "ALTER TABLE saved_avatars ADD COLUMN IF NOT EXISTS source_email VARCHAR(320)",
             "ALTER TABLE batches ADD COLUMN IF NOT EXISTS mode VARCHAR(80) DEFAULT 'fashion_tryon'",
             "ALTER TABLE batches ADD COLUMN IF NOT EXISTS scene_pool JSON",
             "ALTER TABLE batches ADD COLUMN IF NOT EXISTS motion_pool JSON",
@@ -64,6 +66,10 @@ def _add_missing_columns() -> None:
 
     inspector = inspect(engine)
     additions = {
+        "saved_avatars": {
+            "media_id": "VARCHAR(500)",
+            "source_email": "VARCHAR(320)",
+        },
         "batches": {
             "mode": "VARCHAR(80) DEFAULT 'fashion_tryon'",
             "scene_pool": "JSON",

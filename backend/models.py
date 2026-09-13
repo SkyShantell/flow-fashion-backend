@@ -22,8 +22,11 @@ class SavedAvatar(Base):
 
     id = Column(String(64), primary_key=True, default=lambda: new_id("avatar"))
     name = Column(String(160), nullable=False)
+    # Legacy fallback only. New avatars are stored as external Flow assets.
     image_b64 = Column(Text, nullable=False)
     image_mime = Column(String(80), default="image/jpeg")
+    media_id = Column(String(500), nullable=True)
+    source_email = Column(String(320), nullable=True)
     created_at = Column(DateTime(timezone=True), default=utcnow)
     updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
