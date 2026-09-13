@@ -47,6 +47,7 @@ def _add_missing_columns() -> None:
             "ALTER TABLE batches ADD COLUMN IF NOT EXISTS kling_account_email VARCHAR(320)",
             "ALTER TABLE batches ADD COLUMN IF NOT EXISTS kling_model VARCHAR(80) DEFAULT 'kling-v3-0'",
             "ALTER TABLE batches ADD COLUMN IF NOT EXISTS kling_mode VARCHAR(20) DEFAULT 'pro'",
+            "ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS sociavault_region VARCHAR(8) DEFAULT 'US'",
             "ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS scene_override VARCHAR(120)",
             "ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS motion_style_override VARCHAR(80)",
             "ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS editorial_shots JSON",
@@ -76,6 +77,7 @@ def _add_missing_columns() -> None:
             "kling_mode": "VARCHAR(20) DEFAULT 'pro'",
         },
         "product_jobs": {
+            "sociavault_region": "VARCHAR(8) DEFAULT 'US'",
             "scene_override": "VARCHAR(120)",
             "motion_style_override": "VARCHAR(80)",
             "editorial_shots": "JSON",

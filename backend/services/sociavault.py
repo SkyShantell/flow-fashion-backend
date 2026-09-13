@@ -146,9 +146,14 @@ def classify_focus(name: str) -> str:
     return "outfit"
 
 
-def import_product(url: str) -> dict:
+def import_product(url: str, region: str | None = None) -> dict:
     cfg = settings()
-    data = sociavault_get(SOCIA_PRODUCT_DETAILS, {"url": url, "get_related_videos": "false", "region": cfg.sociavault_region})
+    region_code = str(region or cfg.sociavault_region or "US").strip().upper()
+    if region_code == "UK":
+        region_code = "GB"
+    if region_code not in {"US", "GB"}:
+        raise RuntimeError("SociaVault market must be US or UK.")
+    data = sociavault_get(SOCIA_PRODUCT_DETAILS, {"url": url, "get_related_videos": "false", "region": region_code})
     product = data.get("product_base") or data.get("product") or {}
     if not isinstance(product, dict):
         product = {}
@@ -181,7 +186,7 @@ def import_product(url: str) -> dict:
     reviews = [u for u in dedupe(reviews) if u not in set(listing)]
     if not reviews and product_id:
         try:
-            review_data = sociavault_get(SOCIA_PRODUCT_REVIEWS, {"product_id": product_id, "page": 1})
+            review_data = sociavault_get(SOCIA_PRODUCT_REVIEWS, {"product_id": product_id, "page": 1, "region": region_code})
             review_root = review_data.get("product_reviews") or review_data.get("reviews") or review_data
             for review in sv_values(review_root):
                 if isinstance(review, dict):
@@ -197,6 +202,7 @@ def import_product(url: str) -> dict:
     return {
         "product_id": product_id,
         "product_name": name,
+        "sociavault_region": region_code,
         "listing_images": listing,
         "review_images": reviews,
         "selected_refs": default_refs,

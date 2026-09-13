@@ -86,6 +86,7 @@ class ProductJob(Base):
     batch_id = Column(String(64), ForeignKey("batches.id"), nullable=False, index=True)
 
     product_url = Column(Text, nullable=False)
+    sociavault_region = Column(String(8), default="US")
     product_id = Column(String(160), nullable=True, index=True)
     product_name = Column(Text, default="Unknown Product")
     focus = Column(String(40), default="outfit")

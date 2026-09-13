@@ -403,7 +403,11 @@ def run_import_product(db: Session, task: QueueTask) -> None:
     db.add(job)
     db.flush()
 
-    data = sociavault.import_product(job.product_url)
+    region = str((task.payload or {}).get("region") or job.sociavault_region or settings().sociavault_region or "US").strip().upper()
+    if region == "UK":
+        region = "GB"
+    data = sociavault.import_product(job.product_url, region=region)
+    job.sociavault_region = str(data.get("sociavault_region") or region)
     job.product_id = data["product_id"]
     job.product_name = data["product_name"]
     job.listing_images = data["listing_images"]

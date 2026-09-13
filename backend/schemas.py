@@ -38,12 +38,14 @@ class CreateBatchRequest(BaseModel):
 class ImportProductsRequest(BaseModel):
     links: list[str] = Field(default_factory=list)
     start_generation: bool = True
+    region: str = "US"
 
 
 class ImportScannerRequest(BaseModel):
     row_nums: list[int] | None = None
     max_items: int = 10
     start_generation: bool = True
+    region: str = "US"
 
 
 class SelectProductRefsRequest(BaseModel):
@@ -122,6 +124,7 @@ class JobOut(BaseModel):
     product_name: str | None
     product_url: str | None
     product_id: str | None
+    sociavault_region: str = "US"
     focus: str | None
     scene: str | None = None
     motion_style: str | None = None

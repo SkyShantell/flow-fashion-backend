@@ -140,6 +140,7 @@ def job_out(job: ProductJob) -> JobOut:
         product_name=job.product_name,
         product_url=job.product_url,
         product_id=job.product_id,
+        sociavault_region=str(job.sociavault_region or "US"),
         focus=job.focus,
         scene=scene,
         motion_style=motion_style,
@@ -396,6 +397,11 @@ def import_products(batch_id: str, req: ImportProductsRequest, db: Session = Dep
             links.append(link)
     if not links:
         raise HTTPException(400, "No product links supplied")
+    region = str(req.region or "US").strip().upper()
+    if region == "UK":
+        region = "GB"
+    if region not in {"US", "GB"}:
+        raise HTTPException(400, "Shop market must be US or UK")
 
     existing_jobs = db.query(ProductJob).filter(ProductJob.batch_id == batch.id).order_by(ProductJob.created_at.asc()).all()
     existing = {j.product_url for j in existing_jobs}
@@ -405,10 +411,10 @@ def import_products(batch_id: str, req: ImportProductsRequest, db: Session = Dep
             continue
         assigned_scene, assigned_motion = _assign_defaults(batch, next_index)
         next_index += 1
-        job = ProductJob(batch_id=batch.id, product_url=link, stage="pending_import", scene_override=assigned_scene, motion_style_override=assigned_motion)
+        job = ProductJob(batch_id=batch.id, product_url=link, sociavault_region=region, stage="pending_import", scene_override=assigned_scene, motion_style_override=assigned_motion)
         db.add(job)
         db.flush()
-        enqueue_task(db, "import_product", job_id=job.id, batch_id=batch.id, payload={"start_generation": req.start_generation}, priority=10, max_attempts=3)
+        enqueue_task(db, "import_product", job_id=job.id, batch_id=batch.id, payload={"start_generation": req.start_generation, "region": region}, priority=10, max_attempts=3)
     batch.updated_at = datetime.now(timezone.utc)
     db.add(batch)
     db.commit()
@@ -440,6 +446,11 @@ def import_from_scanner(batch_id: str, req: ImportScannerRequest, db: Session = 
         selected = pending[: max(1, int(req.max_items or 10))]
     if not selected:
         raise HTTPException(400, "No pending Scanner Queue rows selected")
+    region = str(req.region or "US").strip().upper()
+    if region == "UK":
+        region = "GB"
+    if region not in {"US", "GB"}:
+        raise HTTPException(400, "Shop market must be US or UK")
 
     row_nums = [int(r.get("_row_num")) for r in selected if int(r.get("_row_num") or 0) >= 2]
     mark_error = sheets.mark_scanner_rows(row_nums, "Importing", batch.id)
@@ -456,6 +467,7 @@ def import_from_scanner(batch_id: str, req: ImportScannerRequest, db: Session = 
         job = ProductJob(
             batch_id=batch.id,
             product_url=link,
+            sociavault_region=region,
             scene_override=assigned_scene,
             motion_style_override=assigned_motion,
             product_name=str(rec.get("Product Name") or "Unknown Product"),
@@ -468,7 +480,7 @@ def import_from_scanner(batch_id: str, req: ImportScannerRequest, db: Session = 
         )
         db.add(job)
         db.flush()
-        enqueue_task(db, "import_product", job_id=job.id, batch_id=batch.id, payload={"start_generation": req.start_generation}, priority=10, max_attempts=3)
+        enqueue_task(db, "import_product", job_id=job.id, batch_id=batch.id, payload={"start_generation": req.start_generation, "region": region}, priority=10, max_attempts=3)
     batch.updated_at = datetime.now(timezone.utc)
     db.add(batch)
     db.commit()
@@ -989,7 +1001,8 @@ def retry_job(job_id: str, req: RetryJobRequest, db: Session = Depends(get_db)):
         job.upscale_error = None
     db.add(job)
     db.flush()
-    enqueue_task(db, task_type, job_id=job.id, batch_id=job.batch_id, priority=15, max_attempts=3, allow_duplicate=True)
+    retry_payload = {"region": str(job.sociavault_region or "US")} if step == "import" else None
+    enqueue_task(db, task_type, job_id=job.id, batch_id=job.batch_id, payload=retry_payload, priority=15, max_attempts=3, allow_duplicate=True)
     db.commit()
     db.refresh(job)
     return job_out(job)
