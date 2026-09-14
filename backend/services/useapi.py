@@ -619,7 +619,24 @@ def resolve_asset_url(media_id: str) -> str:
         return ""
     try:
         payload = request_json("GET", f"{cfg.flow_base}/assets/{quote(media_id, safe='')}", headers=flow_headers(cfg.useapi_token), timeout=60, retries=0)
-        return str(payload.get("url") or "")
+        if not isinstance(payload, dict):
+            return ""
+        # Image assets can come back in a few shapes depending on how Flow created them.
+        direct = payload.get("url") or payload.get("fifeUrl") or payload.get("imageUrl") or payload.get("downloadUrl")
+        if direct:
+            return str(direct)
+        for key in ("image", "generatedImage", "media", "asset", "response"):
+            nested = payload.get(key)
+            if isinstance(nested, dict):
+                candidate = nested.get("url") or nested.get("fifeUrl") or nested.get("imageUrl") or nested.get("downloadUrl")
+                if candidate:
+                    return str(candidate)
+                generated = nested.get("generatedImage")
+                if isinstance(generated, dict):
+                    candidate = generated.get("fifeUrl") or generated.get("url") or generated.get("imageUrl")
+                    if candidate:
+                        return str(candidate)
+        return ""
     except Exception:
         return ""
 
@@ -647,10 +664,28 @@ def download_raw_asset(media_id: str) -> tuple[bytes | None, str]:
             wait = resp.headers.get("Retry-After") or "a few"
             return None, f"Google is still preparing this file. Try again in {wait} seconds."
         try:
-            detail = resp.json().get("error")
+            body = resp.json()
+            detail = body.get("error") or body.get("message") or body.get("detail")
+            if isinstance(detail, dict):
+                detail = detail.get("message") or detail.get("error") or str(detail)
         except Exception:
             detail = resp.text[:300]
-        return None, detail or f"Raw asset fetch failed (HTTP {resp.status_code})."
+
+        detail_text = str(detail or "")
+        # UseAPI's raw asset route currently accepts video IDs only. For stored image
+        # assets (saved avatars / generated images), resolve the image CDN URL instead.
+        if resp.status_code in {400, 404, 422} and ("got 'image'" in detail_text.lower() or 'got "image"' in detail_text.lower() or "type must be 'video'" in detail_text.lower()):
+            image_url = resolve_asset_url(media_id)
+            if image_url:
+                try:
+                    data, _mime = download_url(image_url, 240)
+                    if data:
+                        return data, ""
+                except Exception as image_exc:
+                    return None, f"Stored image asset fetch failed: {image_exc}"
+            return None, detail_text or "Stored image asset URL could not be resolved."
+
+        return None, detail_text or f"Raw asset fetch failed (HTTP {resp.status_code})."
     except Exception as exc:
         return None, f"Raw asset fetch failed: {exc}"
 
