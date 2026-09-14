@@ -1,0 +1,52 @@
+name: Fix Flow Image Asset Recovery
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/fix-flow-image-asset-download.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Make stored Flow image assets recoverable
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('backend/services/useapi.py')
+          text = path.read_text()
+          old = '''def resolve_asset_url(media_id: str) -> str:\n    cfg = settings()\n    if not media_id:\n        return ""\n    try:\n        payload = request_json("GET", f"{cfg.flow_base}/assets/{quote(media_id, safe='')}", headers=flow_headers(cfg.useapi_token), timeout=60, retries=0)\n        return str(payload.get("url") or "")\n    except Exception:\n        return ""\n'''
+          new = '''def resolve_asset_url(media_id: str) -> str:\n    cfg = settings()\n    if not media_id:\n        return ""\n    try:\n        payload = request_json("GET", f"{cfg.flow_base}/assets/{quote(media_id, safe='')}", headers=flow_headers(cfg.useapi_token), timeout=60, retries=0)\n        if not isinstance(payload, dict):\n            return ""\n        # Image assets can come back in a few shapes depending on how Flow created them.\n        direct = payload.get("url") or payload.get("fifeUrl") or payload.get("imageUrl") or payload.get("downloadUrl")\n        if direct:\n            return str(direct)\n        for key in ("image", "generatedImage", "media", "asset", "response"):\n            nested = payload.get(key)\n            if isinstance(nested, dict):\n                candidate = nested.get("url") or nested.get("fifeUrl") or nested.get("imageUrl") or nested.get("downloadUrl")\n                if candidate:\n                    return str(candidate)\n                generated = nested.get("generatedImage")\n                if isinstance(generated, dict):\n                    candidate = generated.get("fifeUrl") or generated.get("url") or generated.get("imageUrl")\n                    if candidate:\n                        return str(candidate)\n        return ""\n    except Exception:\n        return ""\n'''
+          if old not in text:
+              raise SystemExit('resolve_asset_url block did not match current source')
+          text = text.replace(old, new, 1)
+
+          old = '''def download_raw_asset(media_id: str) -> tuple[bytes | None, str]:\n    cfg = settings()\n    if not media_id:\n        return None, "No media ID is available."\n    try:\n        resp = requests.get(\n            f"{cfg.flow_base}/assets/{quote(media_id, safe='')}",\n            params={"raw": "true"},\n            headers=flow_headers(cfg.useapi_token),\n            timeout=240,\n        )\n        if resp.status_code == 200 and resp.content:\n            return resp.content, ""\n        if resp.status_code == 503:\n            wait = resp.headers.get("Retry-After") or "a few"\n            return None, f"Google is still preparing this file. Try again in {wait} seconds."\n        try:\n            detail = resp.json().get("error")\n        except Exception:\n            detail = resp.text[:300]\n        return None, detail or f"Raw asset fetch failed (HTTP {resp.status_code})."\n    except Exception as exc:\n        return None, f"Raw asset fetch failed: {exc}"\n'''
+          new = '''def download_raw_asset(media_id: str) -> tuple[bytes | None, str]:\n    cfg = settings()\n    if not media_id:\n        return None, "No media ID is available."\n    try:\n        resp = requests.get(\n            f"{cfg.flow_base}/assets/{quote(media_id, safe='')}",\n            params={"raw": "true"},\n            headers=flow_headers(cfg.useapi_token),\n            timeout=240,\n        )\n        if resp.status_code == 200 and resp.content:\n            return resp.content, ""\n        if resp.status_code == 503:\n            wait = resp.headers.get("Retry-After") or "a few"\n            return None, f"Google is still preparing this file. Try again in {wait} seconds."\n        try:\n            body = resp.json()\n            detail = body.get("error") or body.get("message") or body.get("detail")\n            if isinstance(detail, dict):\n                detail = detail.get("message") or detail.get("error") or str(detail)\n        except Exception:\n            detail = resp.text[:300]\n\n        detail_text = str(detail or "")\n        # UseAPI's raw asset route currently accepts video IDs only. For stored image\n        # assets (saved avatars / generated images), resolve the image CDN URL instead.\n        if resp.status_code in {400, 404, 422} and ("got 'image'" in detail_text.lower() or 'got "image"' in detail_text.lower() or "type must be 'video'" in detail_text.lower()):\n            image_url = resolve_asset_url(media_id)\n            if image_url:\n                try:\n                    data, _mime = download_url(image_url, 240)\n                    if data:\n                        return data, ""\n                except Exception as image_exc:\n                    return None, f"Stored image asset fetch failed: {image_exc}"\n            return None, detail_text or "Stored image asset URL could not be resolved."\n\n        return None, detail_text or f"Raw asset fetch failed (HTTP {resp.status_code})."\n    except Exception as exc:\n        return None, f"Raw asset fetch failed: {exc}"\n'''
+          if old not in text:
+              raise SystemExit('download_raw_asset block did not match current source')
+          path.write_text(text.replace(old, new, 1))
+          PY
+
+      - name: Syntax check
+        run: python -m py_compile backend/services/useapi.py
+
+      - name: Commit fix and remove workflow
+        shell: bash
+        run: |
+          rm .github/workflows/fix-flow-image-asset-download.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add backend/services/useapi.py .github/workflows/fix-flow-image-asset-download.yml
+          git commit -m "Recover stored Flow image assets correctly"
+          git push origin HEAD:main
