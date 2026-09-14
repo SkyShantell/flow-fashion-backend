@@ -7,7 +7,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Callable
 
-from sqlalchemy import and_, or_
+from sqlalchemy import and_, case, or_
 from sqlalchemy.orm import Session
 
 from backend.config import settings
@@ -221,7 +221,11 @@ def claim_next_task(db: Session) -> QueueTask | None:
     query = (
         db.query(QueueTask)
         .filter(QueueTask.status == "queued", QueueTask.run_after <= _now())
-        .order_by(QueueTask.priority.asc(), QueueTask.created_at.asc())
+        .order_by(
+    case((QueueTask.task_type == "import_product", 1), else_=0).asc(),
+    QueueTask.priority.asc(),
+    QueueTask.created_at.asc(),
+)
     )
     try:
         query = query.with_for_update(skip_locked=True)
