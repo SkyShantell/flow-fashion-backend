@@ -50,11 +50,11 @@ def _available_flow_emails() -> list[str]:
 def resolve_batch_flow_account(batch) -> str:
     """Return one concrete Flow account for every asset in a batch.
 
-    A manually selected account is always honored. Automatic mode keeps batch-level
-    affinity: batches are deterministically spread across connected accounts, while every
-    avatar/product/editorial reference in the same batch is migrated to that one account
-    before generation. This prevents Flow's mismatched-reference-email failures without
-    changing the saved Automatic setting in the dashboard.
+    A manually selected account is always honored. In Automatic mode, a batch created
+    from an externally stored saved avatar stays on the Flow account that owns that avatar.
+    That avoids trying to raw-download an image mediaGenerationId (UseAPI's raw asset
+    endpoint is video-only) just to migrate the avatar between accounts. Batches without
+    a saved external avatar keep deterministic load balancing across connected accounts.
     """
     if batch is None:
         return ""
@@ -62,6 +62,10 @@ def resolve_batch_flow_account(batch) -> str:
     explicit = useapi.normalize_account_email(getattr(batch, "flow_account_email", None))
     if explicit:
         return explicit
+
+    avatar_source = useapi.normalize_account_email(getattr(batch, "avatar_source_email", None))
+    if avatar_source and getattr(batch, "avatar_media_id", None):
+        return avatar_source
 
     emails = _available_flow_emails()
     key = str(getattr(batch, "id", "") or getattr(batch, "name", "") or "flow-fashion")
