@@ -105,9 +105,25 @@ def sociavault_get(endpoint: str, params: dict) -> dict:
     if resp.status_code >= 400:
         raise RuntimeError(f"SociaVault HTTP {resp.status_code}: {parse_error(resp)}")
     payload = resp.json()
-    if isinstance(payload, dict) and payload.get("success") is False:
-        raise RuntimeError(str(payload.get("message") or payload.get("error") or "SociaVault request failed."))
-    data = payload.get("data", payload) if isinstance(payload, dict) else None
+    if not isinstance(payload, dict):
+        raise RuntimeError("SociaVault returned no product data.")
+
+    def fail_if_unsuccessful(node):
+        if isinstance(node, dict) and node.get("success") is False:
+            raise RuntimeError(str(node.get("message") or node.get("error") or "SociaVault request failed."))
+
+    fail_if_unsuccessful(payload)
+    data = payload.get("data", payload)
+    # SociaVault sometimes wraps the scraper result in an additional data envelope.
+    for _ in range(3):
+        if not isinstance(data, dict):
+            break
+        fail_if_unsuccessful(data)
+        nested = data.get("data")
+        if isinstance(nested, dict) and not any(k in data for k in ("product_base", "product", "product_id", "product_detail_review")):
+            data = nested
+            continue
+        break
     if not isinstance(data, dict):
         raise RuntimeError("SociaVault returned no product data.")
     return data
@@ -168,6 +184,10 @@ def import_product(url: str, region: str | None = None) -> dict:
             listing.append(u)
     if not listing:
         listing = sv_collect_urls(raw_images or product)[:18]
+    # Last-resort parser for response-shape changes: scan the returned product payload,
+    # while sv_collect_urls still filters avatars/seller/shop UI imagery.
+    if not listing:
+        listing = sv_collect_urls(data)[:18]
     listing = dedupe([normalize_remote_url(u) for u in listing if normalize_remote_url(u)])[:18]
 
     reviews = []

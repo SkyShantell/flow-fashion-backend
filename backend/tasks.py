@@ -459,7 +459,33 @@ def run_import_product(db: Session, task: QueueTask) -> None:
                 "provider": "scanner_fallback",
             }
     else:
-        data = sociavault.import_product(job.product_url, region=region)
+        try:
+            data = sociavault.import_product(job.product_url, region=region)
+        except Exception as sociavault_exc:
+            # Scanner/Momentum already has a cover image. Use it as a safety net when
+            # SociaVault returns HTTP 200 but no usable gallery due to an upstream shape/scrape issue.
+            scanner_name = str(job.product_name or "Unknown Product").strip() or "Unknown Product"
+            scanner_images = [str(x) for x in _as_list(job.listing_images) if str(x).strip()]
+            if job.scanner_row_num and not scanner_images:
+                scanner_rec, _scanner_error = sheets.scanner_row(int(job.scanner_row_num))
+                if scanner_rec:
+                    scanner_name = str(scanner_rec.get("Product Name") or scanner_name).strip() or scanner_name
+                    scanner_image = sociavault.normalize_remote_url(scanner_rec.get("Product Image"))
+                    if scanner_image:
+                        scanner_images = [scanner_image]
+            if not scanner_images:
+                raise RuntimeError(str(sociavault_exc))
+            product_id = str(job.product_id or "").strip() or hashlib.sha1(str(job.product_url).encode("utf-8")).hexdigest()[:20]
+            data = {
+                "product_id": product_id,
+                "product_name": scanner_name,
+                "sociavault_region": region,
+                "listing_images": scanner_images[:18],
+                "review_images": [],
+                "selected_refs": scanner_images[: settings().max_product_refs],
+                "focus": sociavault.classify_focus(scanner_name),
+                "provider": "scanner_fallback",
+            }
 
     job.sociavault_region = str(data.get("sociavault_region") or region)
     job.product_id = data["product_id"]
