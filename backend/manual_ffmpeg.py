@@ -6,7 +6,7 @@ from typing import Callable
 from sqlalchemy.orm import Session
 
 from backend.models import Batch, ProductJob, QueueTask
-from backend.services import useapi
+from backend.services import drive, useapi
 from backend.styled_overlay import render_styled_overlay
 import backend.tasks as tasks
 import backend.text_overlay as text_overlay
@@ -60,6 +60,36 @@ def _download_ffmpeg_source(job: ProductJob, payload: dict) -> bytes | None:
     if not payload.get("redo"):
         return tasks._download_final_video_for_archive(job)
     return None
+
+
+def _archive_ffmpeg_fallback(db: Session, batch: Batch, job: ProductJob, final_bytes: bytes) -> dict:
+    """Persist a rendered MP4 to Drive when Google Flow refuses a video asset upload."""
+    idx = 1 + db.query(ProductJob).filter(
+        ProductJob.batch_id == batch.id,
+        ProductJob.created_at < job.created_at,
+    ).count()
+    batch_name = f"Batch {batch.id}"
+    batch_date = str(batch.created_at.date()) if batch.created_at else str(job.created_at.date())
+    media_tag = str(job.video_media_id or job.video_source_media_id or job.id)
+    payload, error = drive.archive_bytes(
+        final_bytes,
+        "video/mp4",
+        drive.media_filename(
+            idx,
+            job.product_name or "product",
+            f"{media_tag}-ffmpeg",
+            "video",
+            job.video_resolution or "1080p",
+        ),
+        "video",
+        batch_name=batch_name,
+        product_name=job.product_name or "Product",
+        batch_date=batch_date,
+        description=f"Flow Fashion FFmpeg final video | Product URL: {job.product_url or ''} | Resolution: {job.video_resolution or '1080p'}",
+    )
+    if not payload:
+        raise RuntimeError(error or "Drive fallback did not return a saved video.")
+    return payload
 
 
 def run_apply_text_overlay(db: Session, task: QueueTask) -> None:
@@ -121,20 +151,64 @@ def run_apply_text_overlay(db: Session, task: QueueTask) -> None:
             subheadline_color=subheadline_color,
             placement=placement,
         )
-        uploaded = useapi.upload_video_asset(final_bytes, tasks._batch_flow_account(batch))
-        final_media_id = str(uploaded.get("media_id") or "").strip()
-        if not final_media_id:
-            raise RuntimeError("FFmpeg output uploaded without a media ID.")
 
-        job.video_media_id = final_media_id
-        job.video_url = useapi.resolve_asset_url(final_media_id) or None
-        job.video_source_email = str(uploaded.get("email") or job.video_source_email or "").strip() or None
+        final_media_id = ""
+        final_url = ""
+        final_source_email = ""
+        storage_mode = "flow_asset"
+        drive_payload: dict | None = None
+
+        try:
+            uploaded = useapi.upload_video_asset(final_bytes, tasks._batch_flow_account(batch))
+            final_media_id = str(uploaded.get("media_id") or "").strip()
+            if not final_media_id:
+                raise RuntimeError("FFmpeg output uploaded without a media ID.")
+            final_url = str(useapi.resolve_asset_url(final_media_id) or "").strip()
+            final_source_email = str(uploaded.get("email") or job.video_source_email or "").strip()
+        except Exception as upload_exc:
+            upload_error = str(upload_exc)
+            if "HTTP 410" not in upload_error and "Video upload init failed" not in upload_error:
+                raise
+            log.warning(
+                "Flow rejected FFmpeg MP4 upload; using Drive fallback · job=%s · error=%s",
+                job.id,
+                upload_error[:1000],
+            )
+            drive_payload = _archive_ffmpeg_fallback(db, batch, job, final_bytes)
+            final_url = str(
+                drive_payload.get("download_url")
+                or drive_payload.get("view_url")
+                or ""
+            ).strip()
+            if not final_url:
+                raise RuntimeError("Drive saved the FFmpeg output but returned no usable URL.")
+            storage_mode = "drive_fallback"
+
+        if storage_mode == "drive_fallback" and drive_payload:
+            # Preserve the raw source in this completed task payload for future Redo FFmpeg,
+            # but remove it from the job's final-media fields so downloads cannot accidentally
+            # fall back to the uncaptioned source video.
+            job.video_media_id = None
+            job.video_url = final_url
+            job.video_source_media_id = None
+            job.video_source_url = None
+            job.drive_video_id = str(drive_payload.get("file_id") or "").strip() or None
+            job.drive_video_url = str(
+                drive_payload.get("view_url") or drive_payload.get("download_url") or ""
+            ).strip() or None
+            job.drive_video_download_url = str(drive_payload.get("download_url") or "").strip() or None
+            job.drive_error = None
+        else:
+            job.video_media_id = final_media_id
+            job.video_url = final_url or None
+            job.video_source_email = final_source_email or None
+            job.drive_video_id = None
+            job.drive_video_url = None
+            job.drive_video_download_url = None
+            job.drive_error = None
+
         job.video_error = None
         job.stage = "complete"
-        job.drive_video_id = None
-        job.drive_video_url = None
-        job.drive_video_download_url = None
-        job.drive_error = None
         db.add(job)
 
         payload.update({
@@ -150,6 +224,8 @@ def run_apply_text_overlay(db: Session, task: QueueTask) -> None:
             "fashion_text_overlay_subheadline_color": subheadline_color,
             "fashion_text_overlay_placement": placement,
             "fashion_text_overlay_media_id": final_media_id,
+            "fashion_text_overlay_storage": storage_mode,
+            "fashion_text_overlay_url": final_url,
             "video_job_id": current_video_job_id,
         })
         task.payload = payload
@@ -175,11 +251,17 @@ def run_apply_text_overlay(db: Session, task: QueueTask) -> None:
             max_attempts=2,
             allow_duplicate=True,
         )
-        log.info("Manual styled FFmpeg completed · job=%s · media=%s · redo=%s", job.id, final_media_id, bool(payload.get("redo")))
+        log.info(
+            "Manual styled FFmpeg completed · job=%s · media=%s · storage=%s · redo=%s",
+            job.id,
+            final_media_id or "drive",
+            storage_mode,
+            bool(payload.get("redo")),
+        )
     except Exception:
         if int(task.attempts or 0) >= int(task.max_attempts or 1):
             # A failed redo must leave the previous successful FFmpeg version available.
-            job.stage = "complete" if payload.get("redo") and job.video_media_id else "video_complete"
+            job.stage = "complete" if payload.get("redo") and (job.video_media_id or job.video_url or job.drive_video_download_url) else "video_complete"
             db.add(job)
             db.flush()
         raise
