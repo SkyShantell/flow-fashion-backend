@@ -16,6 +16,7 @@ DETAIL_V1 = f"{TIKHUB_BASE}/fetch_product_detail"
 REVIEWS_V2 = f"{TIKHUB_BASE}/fetch_product_reviews_v2"
 
 log = logging.getLogger("flow-tikhub")
+_GB_TITLE_SHAPE_LOGGED = False
 
 
 def extract_product_id(url: str) -> str:
@@ -201,6 +202,7 @@ def _merge_unique(*groups: list[str], limit: int = 30) -> list[str]:
 
 def lookup_product_name(url: str, region: str = "US") -> str:
     """Fetch a title from TikHub when the primary product importer has no name."""
+    global _GB_TITLE_SHAPE_LOGGED
     region_code = str(region or "US").strip().upper()
     if region_code not in {"US", "GB"}:
         return "Unknown Product"
@@ -214,11 +216,15 @@ def lookup_product_name(url: str, region: str = "US") -> str:
         product = data.get("productInfo") or data.get("product_info") or {}
     if not isinstance(product, dict):
         product = {}
-    return _first_text(
+    title = _first_text(
         product or data,
         ("title", "product_title", "productTitle", "name", "product_name", "productName"),
         blocked=("seller", "shop", "brand", "category", "review", "related"),
     ) or "Unknown Product"
+    if region_code == "GB" and title == "Unknown Product" and not _GB_TITLE_SHAPE_LOGGED:
+        _GB_TITLE_SHAPE_LOGGED = True
+        log.warning("TikHub GB title missing · root_keys=%s · global_keys=%s · product_keys=%s", sorted(data.keys())[:20], sorted(global_data.keys())[:20] if isinstance(global_data, dict) else [], sorted(product.keys())[:20])
+    return title
 
 
 def import_product(url: str, region: str = "GB") -> dict:

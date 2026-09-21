@@ -25,6 +25,7 @@ from backend.services import drive, editorial, sheets, sociavault, tikhub, useap
 TERMINAL_TASK_STATUSES = {"done", "failed", "canceled"}
 EDITORIAL_SHOT_ORDER = ("A", "B", "C")
 log = logging.getLogger("flow-import")
+_GB_TITLE_URL_LOGGED = False
 
 
 def _product_name_fallback(job: ProductJob, db: Session) -> str:
@@ -69,6 +70,7 @@ def _resolve_missing_name(job: ProductJob, db: Session, region: str, *, retry_so
 
 
 def run_repair_product_name(db: Session, task: QueueTask) -> None:
+    global _GB_TITLE_URL_LOGGED
     job = db.get(ProductJob, task.job_id)
     if not job or (str(job.product_name or "").strip().lower() not in {"", "unknown product"}):
         return
@@ -78,6 +80,9 @@ def run_repair_product_name(db: Session, task: QueueTask) -> None:
     log.info("Repairing missing product title · job=%s · region=%s", job.id, region)
     name = _resolve_missing_name(job, db, region, retry_sociavault=True)
     if name == "Unknown Product":
+        if region == "GB" and not _GB_TITLE_URL_LOGGED:
+            _GB_TITLE_URL_LOGGED = True
+            log.warning("Unresolved GB product link example · %s", str(job.product_url or "").split("?", 1)[0][:250])
         log.warning("Product title unavailable from linked sources · job=%s · region=%s", job.id, region)
         return
     job.product_name = name
