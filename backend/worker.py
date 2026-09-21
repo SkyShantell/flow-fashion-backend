@@ -77,6 +77,20 @@ def main():
             repair.run_after = utcnow()
             db.add(repair)
             gb_requeued += 1
+        us_repairs = db.query(QueueTask).join(ProductJob, QueueTask.job_id == ProductJob.id).filter(QueueTask.task_type == "repair_product_name", QueueTask.status == "done", ProductJob.product_name == "Unknown Product", ProductJob.sociavault_region == "US").all()
+        us_requeued = 0
+        for repair in us_repairs:
+            payload = dict(repair.payload or {})
+            if payload.get("us_page_retry"):
+                continue
+            payload["us_page_retry"] = True
+            payload["page_only"] = True
+            repair.payload = payload
+            repair.status = "queued"
+            repair.attempts = 0
+            repair.run_after = utcnow()
+            db.add(repair)
+            us_requeued += 1
         resumed_names = db.query(QueueTask).filter(QueueTask.task_type == "repair_product_name", QueueTask.status == "running").update({"status": "queued", "locked_at": None, "run_after": utcnow()}, synchronize_session=False)
         queued_names = enqueue_missing_product_names(db)
         repair_states = {state: db.query(QueueTask).filter(QueueTask.task_type == "repair_product_name", QueueTask.status == state).count() for state in ("queued", "running", "done", "failed")}
@@ -85,6 +99,8 @@ def main():
     log.info("Product title repair status · unknown=%s · queued=%s · running=%s · done=%s · failed=%s", unknown_count, repair_states["queued"], repair_states["running"], repair_states["done"], repair_states["failed"])
     for failure in failure_examples:
         log.warning("Product title repair failure example: %s", str(failure or "")[:240])
+    if us_requeued:
+        log.info("Queued %s unresolved US titles for TikTok page lookup", us_requeued)
     if gb_requeued:
         log.info("Queued %s unresolved GB titles for TikHub retry", gb_requeued)
     if interrupted_repairs:

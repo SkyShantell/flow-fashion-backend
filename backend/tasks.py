@@ -84,7 +84,15 @@ def run_repair_product_name(db: Session, task: QueueTask) -> None:
     if region == "UK":
         region = "GB"
     log.info("Repairing missing product title · job=%s · region=%s", job.id, region)
-    name = _resolve_missing_name(job, db, region, retry_sociavault=True)
+    if (task.payload or {}).get("page_only"):
+        name = _product_name_fallback(job, db)
+        if name == "Unknown Product":
+            try:
+                name = sociavault.tiktok_page_title(job.product_url)
+            except Exception as exc:
+                log.warning("TikTok page title lookup failed · job=%s · %s", job.id, str(exc)[:250])
+    else:
+        name = _resolve_missing_name(job, db, region, retry_sociavault=True)
     if name == "Unknown Product":
         if region == "GB" and not _GB_TITLE_URL_LOGGED:
             _GB_TITLE_URL_LOGGED = True
