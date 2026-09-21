@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import html
+import logging
 import re
 
 import requests
@@ -12,6 +13,48 @@ from backend.services.useapi import parse_error, normalize_image_bytes
 SOCIA_BASE = "https://api.sociavault.com/v1"
 SOCIA_PRODUCT_DETAILS = f"{SOCIA_BASE}/scrape/tiktok-shop/product-details"
 SOCIA_PRODUCT_REVIEWS = f"{SOCIA_BASE}/scrape/tiktok-shop/product-reviews"
+log = logging.getLogger("flow-sociavault")
+
+
+def product_title(data: dict) -> str:
+    """Find the product title across SociaVault's flat and nested response shapes."""
+    blocked = {"seller", "shop", "review", "related", "video", "category", "brand", "sku"}
+
+    def walk(node, depth=0, allow_name=False):
+        if depth > 7 or not isinstance(node, dict):
+            return ""
+        for key, value in node.items():
+            normalized = re.sub(r"[^a-z0-9]", "", str(key).lower())
+            if normalized in {"title", "producttitle", "productname"} and isinstance(value, str):
+                candidate = html.unescape(value).strip()
+                if candidate and candidate.lower() != "unknown product":
+                    return candidate
+        if allow_name and isinstance(node.get("name"), str):
+            candidate = html.unescape(node["name"]).strip()
+            if candidate and candidate.lower() != "unknown product":
+                return candidate
+        for key, value in node.items():
+            if any(word in str(key).lower() for word in blocked):
+                continue
+            if isinstance(value, dict):
+                normalized = re.sub(r"[^a-z0-9]", "", str(key).lower())
+                result = walk(value, depth + 1, normalized in {"productbase", "productinfo", "productdetail", "product"})
+                if result:
+                    return result
+        return ""
+
+    for key in ("product_base", "productBase", "product", "product_info", "productInfo", "product_detail", "productDetail", "data"):
+        node = data.get(key)
+        if isinstance(node, dict):
+            name = walk(node, allow_name=key != "data")
+            if name:
+                return name
+    return walk(data) or "Unknown Product"
+
+
+def lookup_product_name(url: str, region: str = "US") -> str:
+    data = sociavault_get(SOCIA_PRODUCT_DETAILS, {"url": url, "get_related_videos": "false", "region": region})
+    return product_title(data)
 
 
 def normalize_remote_url(value) -> str:
@@ -173,15 +216,9 @@ def import_product(url: str, region: str | None = None) -> dict:
     product = data.get("product_base") or data.get("product") or {}
     if not isinstance(product, dict):
         product = {}
-    candidates = (
-        product.get("title"), product.get("product_title"), product.get("product_name"),
-        product.get("name"), data.get("title"), data.get("product_title"), data.get("product_name"),
-    )
-    name = next(
-        (value.strip() for value in candidates if isinstance(value, str) and value.strip()
-         and value.strip().lower() != "unknown product"),
-        "Unknown Product",
-    )
+    name = product_title(data)
+    if name == "Unknown Product":
+        log.warning("SociaVault product details omitted title · keys=%s · product_keys=%s", sorted(data.keys())[:25], sorted(product.keys())[:25])
     product_id = str(data.get("product_id") or product.get("id") or hashlib.sha1(url.encode()).hexdigest()[:12])
 
     listing = []

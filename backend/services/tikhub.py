@@ -199,6 +199,23 @@ def _merge_unique(*groups: list[str], limit: int = 30) -> list[str]:
     return out
 
 
+def lookup_product_name(url: str, region: str = "US") -> str:
+    """Use TikHub's US product detail as a title fallback when SociaVault omits it."""
+    region_code = str(region or "US").strip().upper()
+    if region_code != "US":
+        return "Unknown Product"
+    product_id = extract_product_id(url)
+    data = _get(DETAIL_V3, {"product_id": product_id, "region": region_code})
+    product = data.get("productInfo") or data.get("product_info") or {}
+    if not isinstance(product, dict):
+        return "Unknown Product"
+    return _first_text(
+        product,
+        ("title", "product_title", "productTitle", "name", "product_name", "productName"),
+        blocked=("seller", "shop", "brand", "category", "review", "related"),
+    ) or "Unknown Product"
+
+
 def import_product(url: str, region: str = "GB") -> dict:
     region_code = str(region or "GB").strip().upper()
     if region_code == "UK":

@@ -8,7 +8,7 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
 from backend.config import settings
 from backend.db import init_db, session_scope
-from backend.tasks import claim_next_task, run_task_by_id
+from backend.tasks import claim_next_task, enqueue_missing_product_names, run_task_by_id
 from backend.flow_account_affinity import install_flow_account_affinity
 from backend.video_provider import install_video_provider_handlers
 from backend.text_overlay import install_text_overlay_handler
@@ -50,6 +50,10 @@ def main():
     # Install last: returned videos become visible immediately and FFmpeg text waits for
     # the user's manual button on both Fashion Try-On and Shoe Showcase jobs.
     install_manual_ffmpeg_handler()
+    with session_scope() as db:
+        queued_names = enqueue_missing_product_names(db)
+    if queued_names:
+        log.info("Queued %s missing product titles for recovery", queued_names)
     cfg = settings()
     concurrency = max(1, int(cfg.worker_concurrency or 1))
     log.info(

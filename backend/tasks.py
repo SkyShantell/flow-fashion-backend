@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import logging
 import re
 import time
 from datetime import datetime, timedelta, timezone
@@ -23,6 +24,7 @@ from backend.services import drive, editorial, sheets, sociavault, tikhub, useap
 
 TERMINAL_TASK_STATUSES = {"done", "failed", "canceled"}
 EDITORIAL_SHOT_ORDER = ("A", "B", "C")
+log = logging.getLogger("flow-import")
 
 
 def _product_name_fallback(job: ProductJob, db: Session) -> str:
@@ -41,6 +43,64 @@ def _product_name_fallback(job: ProductJob, db: Session) -> str:
     if len(words) >= 8 and re.search(r"[a-zA-Z]", words) and not words.isdigit():
         return words
     return "Unknown Product"
+
+
+def _resolve_missing_name(job: ProductJob, db: Session, region: str, *, retry_sociavault: bool = False) -> str:
+    name = _product_name_fallback(job, db)
+    if name != "Unknown Product":
+        return name
+    if retry_sociavault:
+        try:
+            name = sociavault.lookup_product_name(job.product_url, region)
+        except Exception as exc:
+            log.warning("SociaVault title lookup failed · job=%s · %s", job.id, str(exc)[:250])
+        if name != "Unknown Product":
+            return name
+    if region == "US" and settings().tikhub_api_key:
+        try:
+            name = tikhub.lookup_product_name(job.product_url, region)
+        except Exception as exc:
+            log.warning("TikHub title lookup failed · job=%s · %s", job.id, str(exc)[:250])
+        if name != "Unknown Product":
+            return name
+    return "Unknown Product"
+
+
+def run_repair_product_name(db: Session, task: QueueTask) -> None:
+    job = db.get(ProductJob, task.job_id)
+    if not job or (str(job.product_name or "").strip().lower() not in {"", "unknown product"}):
+        return
+    region = str(job.sociavault_region or "US").strip().upper()
+    if region == "UK":
+        region = "GB"
+    name = _resolve_missing_name(job, db, region, retry_sociavault=True)
+    if name == "Unknown Product":
+        log.warning("Product title unavailable from linked sources · job=%s · region=%s", job.id, region)
+        return
+    job.product_name = name
+    db.add(job)
+    db.flush()
+    log.info("Repaired product title · job=%s · region=%s", job.id, region)
+    if job.sheet_row:
+        enqueue_task(db, "sync_sheet", job_id=job.id, batch_id=job.batch_id, priority=300)
+
+
+def enqueue_missing_product_names(db: Session) -> int:
+    """Backfill existing Fashion and Shoe jobs once without rerunning generation."""
+    already_attempted = db.query(QueueTask.job_id).filter(QueueTask.task_type == "repair_product_name")
+    jobs = (
+        db.query(ProductJob)
+        .filter(
+            or_(ProductJob.product_name == "Unknown Product", ProductJob.product_name == "", ProductJob.product_name.is_(None)),
+            ProductJob.stage.notin_(["pending_import", "importing"]),
+            ~ProductJob.id.in_(already_attempted),
+        )
+        .order_by(ProductJob.created_at.desc())
+        .all()
+    )
+    for job in jobs:
+        enqueue_task(db, "repair_product_name", job_id=job.id, batch_id=job.batch_id, priority=500, max_attempts=1)
+    return len(jobs)
 
 
 def _editorial_shots(job: ProductJob) -> list[dict]:
@@ -510,7 +570,9 @@ def run_import_product(db: Session, task: QueueTask) -> None:
     job.sociavault_region = str(data.get("sociavault_region") or region)
     job.product_id = data["product_id"]
     imported_name = str(data["product_name"] or "").strip()
-    job.product_name = imported_name if imported_name and imported_name.lower() != "unknown product" else _product_name_fallback(job, db)
+    job.product_name = imported_name if imported_name and imported_name.lower() != "unknown product" else _resolve_missing_name(job, db, region)
+    if job.product_name == "Unknown Product":
+        log.warning("Imported product without title · job=%s · region=%s · provider=%s", job.id, region, data.get("provider") or ("tikhub" if region == "GB" else "sociavault"))
     job.listing_images = data["listing_images"]
     job.review_images = data["review_images"]
     job.selected_refs = data["selected_refs"]
@@ -1290,6 +1352,7 @@ def run_sync_sheet(db: Session, task: QueueTask) -> None:
 
 HANDLERS: dict[str, Callable[[Session, QueueTask], None]] = {
     "import_product": run_import_product,
+    "repair_product_name": run_repair_product_name,
     "generate_image": run_generate_image,
     "generate_editorial_frame": run_generate_editorial_frame,
     "submit_editorial_clip": run_submit_editorial_clip,
