@@ -232,7 +232,7 @@ def import_product(url: str, region: str = "GB") -> dict:
 
     # Use V1 whenever V3 failed entirely or did not yield at least two real photos.
     v1_error = ""
-    if v3_error or len(listing_images) < 2:
+    if v3_error or len(listing_images) < 2 or title == "Unknown Product":
         try:
             detail_v1 = _get(
                 DETAIL_V1,

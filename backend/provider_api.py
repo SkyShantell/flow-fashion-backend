@@ -64,15 +64,15 @@ def _provider_config(batch: Batch) -> dict:
             "batch_id": batch.id,
             "batch_name": batch.name,
             "mode": batch.mode or "shoe_showcase",
-            "video_provider": "kling",
-            "video_provider_label": "Kling O1",
-            "kling_account_email": batch.kling_account_email,
-            "kling_model": "kling-o1",
-            "kling_mode": "pro",
-            "kling_duration": 10,
+            "video_provider": "enhancor",
+            "video_provider_label": "Seedance 2.0 via Enhancor",
+            "kling_account_email": None,
+            "kling_model": "",
+            "kling_mode": "",
+            "kling_duration": 5,
             "kling_audio": False,
             "kling_multi_shot": False,
-            "aspect_ratio": "9:16 · approved Flow image @image_1 + up to 6 shoe refs",
+            "aspect_ratio": "9:16 · approved Flow opener + selected shoe refs + black video",
             "automatic_fallback": False,
             "locked_for_shoes": True,
         }
@@ -375,11 +375,12 @@ def apply_text_overlay(
 def video_provider_health():
     return {
         "ok": True,
-        "providers": ["omni", "kling"],
+        "providers": ["omni", "kling", "enhancor"],
         "fashion_kling_model": "kling-v3-0",
         "fashion_kling_duration": 8,
-        "shoe_kling_model": "kling-o1",
-        "shoe_kling_duration": 10,
+        "shoe_video_provider": "enhancor",
+        "shoe_video_model": "seedance-2.0",
+        "shoe_video_duration": 5,
         "shoe_reference_limit": 7,
         "kling_audio": False,
         "automatic_fallback": False,
@@ -417,16 +418,7 @@ def update_batch_video_provider(
         raise HTTPException(404, "Batch not found")
 
     if (batch.mode or "fashion_tryon") == "shoe_showcase":
-        try:
-            account = useapi.resolve_kling_account_email(
-                req.kling_account_email or batch.kling_account_email or ""
-            )
-        except Exception as exc:
-            raise HTTPException(400, f"Kling O1 could not be selected: {exc}")
-        batch.video_provider = "kling"
-        batch.kling_account_email = account
-        batch.kling_model = "kling-o1"
-        batch.kling_mode = "pro"
+        batch.video_provider = "enhancor"
         batch.updated_at = datetime.now(timezone.utc)
         db.add(batch)
         db.commit()

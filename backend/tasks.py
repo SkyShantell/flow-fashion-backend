@@ -3,9 +3,11 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import re
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Callable
+from urllib.parse import unquote, urlsplit
 
 from sqlalchemy import and_, case, or_
 from sqlalchemy.orm import Session
@@ -21,6 +23,24 @@ from backend.services import drive, editorial, sheets, sociavault, tikhub, useap
 
 TERMINAL_TASK_STATUSES = {"done", "failed", "canceled"}
 EDITORIAL_SHOT_ORDER = ("A", "B", "C")
+
+
+def _product_name_fallback(job: ProductJob, db: Session) -> str:
+    name = str(job.product_name or "").strip()
+    if name and name.lower() != "unknown product":
+        return name
+    if job.scanner_row_num:
+        record, _ = sheets.scanner_row(int(job.scanner_row_num))
+        if record:
+            name = str(record.get("Product Name") or "").strip()
+            if name and name.lower() != "unknown product":
+                return name
+    slug = unquote(urlsplit(str(job.product_url or "")).path).rstrip("/").split("/")[-1]
+    slug = re.sub(r"[-_]?\d{15,24}$", "", slug)
+    words = re.sub(r"[-_]+", " ", slug).strip()
+    if len(words) >= 8 and re.search(r"[a-zA-Z]", words) and not words.isdigit():
+        return words
+    return "Unknown Product"
 
 
 def _editorial_shots(job: ProductJob) -> list[dict]:
@@ -430,7 +450,7 @@ def run_import_product(db: Session, task: QueueTask) -> None:
         except Exception as tikhub_exc:
             # Momentum/Scanner already captured a name + cover. Use that as the final UK fallback
             # instead of failing an otherwise usable product when TikHub rejects this specific ID.
-            scanner_name = str(job.product_name or "Unknown Product").strip() or "Unknown Product"
+            scanner_name = _product_name_fallback(job, db)
             scanner_images = [str(x) for x in _as_list(job.listing_images) if str(x).strip()]
             if job.scanner_row_num and not scanner_images:
                 scanner_rec, _scanner_error = sheets.scanner_row(int(job.scanner_row_num))
@@ -464,7 +484,7 @@ def run_import_product(db: Session, task: QueueTask) -> None:
         except Exception as sociavault_exc:
             # Scanner/Momentum already has a cover image. Use it as a safety net when
             # SociaVault returns HTTP 200 but no usable gallery due to an upstream shape/scrape issue.
-            scanner_name = str(job.product_name or "Unknown Product").strip() or "Unknown Product"
+            scanner_name = _product_name_fallback(job, db)
             scanner_images = [str(x) for x in _as_list(job.listing_images) if str(x).strip()]
             if job.scanner_row_num and not scanner_images:
                 scanner_rec, _scanner_error = sheets.scanner_row(int(job.scanner_row_num))
@@ -489,7 +509,8 @@ def run_import_product(db: Session, task: QueueTask) -> None:
 
     job.sociavault_region = str(data.get("sociavault_region") or region)
     job.product_id = data["product_id"]
-    job.product_name = data["product_name"]
+    imported_name = str(data["product_name"] or "").strip()
+    job.product_name = imported_name if imported_name and imported_name.lower() != "unknown product" else _product_name_fallback(job, db)
     job.listing_images = data["listing_images"]
     job.review_images = data["review_images"]
     job.selected_refs = data["selected_refs"]

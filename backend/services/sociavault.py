@@ -173,7 +173,15 @@ def import_product(url: str, region: str | None = None) -> dict:
     product = data.get("product_base") or data.get("product") or {}
     if not isinstance(product, dict):
         product = {}
-    name = str(product.get("title") or product.get("name") or "Unknown Product").strip()
+    candidates = (
+        product.get("title"), product.get("product_title"), product.get("product_name"),
+        product.get("name"), data.get("title"), data.get("product_title"), data.get("product_name"),
+    )
+    name = next(
+        (value.strip() for value in candidates if isinstance(value, str) and value.strip()
+         and value.strip().lower() != "unknown product"),
+        "Unknown Product",
+    )
     product_id = str(data.get("product_id") or product.get("id") or hashlib.sha1(url.encode()).hexdigest()[:12])
 
     listing = []

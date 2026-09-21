@@ -70,6 +70,7 @@ class UpdateVideoProviderRequest(BaseModel):
 
 
 class UpdateJobSettingsRequest(BaseModel):
+    product_name: str | None = None
     focus: str | None = None
     scene: str | None = None
     motion_style: str | None = None

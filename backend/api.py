@@ -844,6 +844,12 @@ def update_job_production_settings(job_id: str, req: UpdateJobSettingsRequest, d
     if not job:
         raise HTTPException(404, "Job not found")
 
+    if req.product_name is not None:
+        name = req.product_name.strip()
+        if not name or len(name) > 250:
+            raise HTTPException(400, "Product name must be 1–250 characters.")
+        job.product_name = name
+
     image_started = job.image_status in {"processing", "completed"} or job.stage in {"generating_image", "awaiting_approval", "ready_for_video", "submitting_video", "video_processing", "upscaling", "complete"}
     if image_started and (req.focus is not None or req.scene is not None):
         raise HTTPException(409, "Product type/background are locked after image generation starts. Regenerate the image to change them.")
