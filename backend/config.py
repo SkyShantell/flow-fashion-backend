@@ -29,7 +29,7 @@ class Settings:
     tikhub_api_key: str = os.getenv("TIKHUB_API_KEY", "").strip()
     enhancor_api_key: str = os.getenv("ENHANCOR_API_KEY", "").strip()
     enhancor_base: str = os.getenv("ENHANCOR_BASE", "https://apireq.enhancor.ai/api/enhancor-video-pro/v1").strip().rstrip("/")
-    enhancor_black_video_url: str = os.getenv("ENHANCOR_BLACK_VIDEO_URL", "").strip()
+    seedance_black_video_url: str = os.getenv("SEEDANCE_BLACK_VIDEO_URL", "").strip()
 
     # useapi / Flow
     flow_base: str = os.getenv("FLOW_BASE", "https://api.useapi.net/v1/google-flow").strip().rstrip("/")

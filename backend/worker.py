@@ -43,8 +43,7 @@ def main():
     install_flow_account_affinity()
     install_video_provider_handlers()
     install_text_overlay_handler()
-    # Use the compact O1 prompt that preserves every critical product/visibility rule
-    # while staying under Kling's 1700-character Omni prompt limit.
+    # Keep the established shoe product and visibility rules for Seedance.
     shoe_o1.shoe_o1_video_prompt = shoe_o1_video_prompt
     # Install Shoe Showcase after provider/text guards so only shoe generation is replaced.
     install_shoe_o1_handlers()
@@ -54,7 +53,7 @@ def main():
     cfg = settings()
     concurrency = max(1, int(cfg.worker_concurrency or 1))
     log.info(
-        "Flow Phase 1 worker started · concurrency=%s · image=%s · Flow video=%s · fashion Kling=3.0/8s · shoes=Kling O1/10s/multi-reference · final=%s · FFmpeg text=manual",
+        "Flow Phase 1 worker started · concurrency=%s · image=%s · Flow video=%s · fashion Kling=3.0/8s · shoes=Seedance 2.0 via Enhancor · final=%s · FFmpeg text=manual",
         concurrency,
         cfg.image_model,
         cfg.video_model,
