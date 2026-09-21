@@ -200,17 +200,22 @@ def _merge_unique(*groups: list[str], limit: int = 30) -> list[str]:
 
 
 def lookup_product_name(url: str, region: str = "US") -> str:
-    """Use TikHub's US product detail as a title fallback when SociaVault omits it."""
+    """Fetch a title from TikHub when the primary product importer has no name."""
     region_code = str(region or "US").strip().upper()
-    if region_code != "US":
+    if region_code not in {"US", "GB"}:
         return "Unknown Product"
     product_id = extract_product_id(url)
-    data = _get(DETAIL_V3, {"product_id": product_id, "region": region_code}, timeout=20, max_attempts=2)
-    product = data.get("productInfo") or data.get("product_info") or {}
+    if region_code == "GB":
+        data = _get(DETAIL_V1, {"product_id": product_id, "seller_id": "", "region": region_code}, timeout=20, max_attempts=2)
+        global_data = data.get("global_data") or data.get("globalData") or {}
+        product = global_data.get("product_info") or global_data.get("productInfo") or data.get("product_info") or data.get("productInfo") or {}
+    else:
+        data = _get(DETAIL_V3, {"product_id": product_id, "region": region_code}, timeout=20, max_attempts=2)
+        product = data.get("productInfo") or data.get("product_info") or {}
     if not isinstance(product, dict):
-        return "Unknown Product"
+        product = {}
     return _first_text(
-        product,
+        product or data,
         ("title", "product_title", "productTitle", "name", "product_name", "productName"),
         blocked=("seller", "shop", "brand", "category", "review", "related"),
     ) or "Unknown Product"

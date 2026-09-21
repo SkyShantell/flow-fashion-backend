@@ -49,7 +49,7 @@ def _resolve_missing_name(job: ProductJob, db: Session, region: str, *, retry_so
     name = _product_name_fallback(job, db)
     if name != "Unknown Product":
         return name
-    if retry_sociavault:
+    if retry_sociavault and region == "US":
         try:
             log.info("Looking up SociaVault title · job=%s", job.id)
             name = sociavault.lookup_product_name(job.product_url, region)
@@ -57,7 +57,7 @@ def _resolve_missing_name(job: ProductJob, db: Session, region: str, *, retry_so
             log.warning("SociaVault title lookup failed · job=%s · %s", job.id, str(exc)[:250])
         if name != "Unknown Product":
             return name
-    if region == "US" and settings().tikhub_api_key:
+    if region in {"US", "GB"} and settings().tikhub_api_key:
         try:
             log.info("Looking up TikHub title · job=%s", job.id)
             name = tikhub.lookup_product_name(job.product_url, region)
