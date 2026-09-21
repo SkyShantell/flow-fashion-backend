@@ -4,6 +4,8 @@ import hashlib
 import html
 import logging
 import re
+from html.parser import HTMLParser
+from urllib.parse import urljoin, urlsplit
 
 import requests
 
@@ -55,6 +57,50 @@ def product_title(data: dict) -> str:
 def lookup_product_name(url: str, region: str = "US") -> str:
     data = sociavault_get(SOCIA_PRODUCT_DETAILS, {"url": url, "get_related_videos": "false", "region": region}, timeout=20)
     return product_title(data)
+
+
+def tiktok_page_title(url: str) -> str:
+    """Use a public TikTok page's own metadata when regional APIs omit the title."""
+    class TitleParser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.title = ""
+            self.in_title = False
+
+        def handle_starttag(self, tag, attrs):
+            if tag == "title":
+                self.in_title = True
+            if tag == "meta":
+                values = dict(attrs)
+                if values.get("property") == "og:title" or values.get("name") == "twitter:title":
+                    self.title = values.get("content") or self.title
+
+        def handle_endtag(self, tag):
+            if tag == "title":
+                self.in_title = False
+
+        def handle_data(self, data):
+            if self.in_title and not self.title:
+                self.title = data
+
+    current = str(url or "").strip()
+    headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/151 Safari/537.36", "Accept": "text/html"}
+    for _ in range(3):
+        host = (urlsplit(current).hostname or "").lower()
+        if urlsplit(current).scheme not in {"http", "https"} or not (host == "tiktok.com" or host.endswith(".tiktok.com")):
+            return "Unknown Product"
+        response = requests.get(current, headers=headers, timeout=(4, 9), allow_redirects=False)
+        if response.status_code in {301, 302, 303, 307, 308}:
+            current = urljoin(current, response.headers.get("Location") or "")
+            continue
+        if response.status_code >= 400:
+            return "Unknown Product"
+        parser = TitleParser()
+        parser.feed(response.text[:1_000_000])
+        name = html.unescape(parser.title).strip()
+        name = re.sub(r"\s*[|\-]\s*TikTok(?: Shop)?\s*$", "", name, flags=re.I).strip()
+        return name if len(name) >= 8 and name.lower() not in {"tiktok shop", "tiktok - make your day", "shop on tiktok"} else "Unknown Product"
+    return "Unknown Product"
 
 
 def normalize_remote_url(value) -> str:

@@ -66,6 +66,12 @@ def _resolve_missing_name(job: ProductJob, db: Session, region: str, *, retry_so
             log.warning("TikHub title lookup failed · job=%s · %s", job.id, str(exc)[:250])
         if name != "Unknown Product":
             return name
+    try:
+        name = sociavault.tiktok_page_title(job.product_url)
+    except Exception as exc:
+        log.warning("TikTok page title lookup failed · job=%s · %s", job.id, str(exc)[:250])
+    if name != "Unknown Product":
+        return name
     return "Unknown Product"
 
 

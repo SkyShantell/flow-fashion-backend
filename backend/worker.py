@@ -66,16 +66,11 @@ def main():
             db.add(repair)
         gb_repairs = db.query(QueueTask).join(ProductJob, QueueTask.job_id == ProductJob.id).filter(QueueTask.task_type == "repair_product_name", QueueTask.status == "done", ProductJob.product_name == "Unknown Product", ProductJob.sociavault_region.in_(["GB", "UK"])).all()
         gb_requeued = 0
-        gb_diag_queued = False
         for repair in gb_repairs:
             payload = dict(repair.payload or {})
-            if payload.get("gb_v1_retry"):
-                if gb_diag_queued or payload.get("gb_diag_retry"):
-                    continue
-                payload["gb_diag_retry"] = True
-                gb_diag_queued = True
-            else:
-                payload["gb_v1_retry"] = True
+            if payload.get("gb_page_retry"):
+                continue
+            payload["gb_page_retry"] = True
             repair.payload = payload
             repair.status = "queued"
             repair.attempts = 0
