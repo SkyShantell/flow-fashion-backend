@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hmac
 import re
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -15,7 +16,7 @@ from backend.flow_account_affinity import install_flow_account_affinity
 from backend.manual_ffmpeg import caption_for_job, install_manual_ffmpeg_handler
 from backend.models import Batch, EmojiAsset, ProductJob, QueueTask
 from backend.schemas import ApplyTextOverlayRequest, EmojiSeedRequest, UpdateVideoProviderRequest
-from backend.services import useapi
+from backend.services import enhancor, sociavault, useapi
 from backend.shoe_o1 import install_shoe_o1_handlers, shoe_o1_images_ready
 from backend.shoe_o1_prompt import shoe_o1_video_prompt
 from backend.styled_overlay import overlay_options
@@ -24,6 +25,60 @@ from backend.video_provider import install_video_provider_handlers, provider_con
 
 
 router = APIRouter()
+
+
+@router.get("/api/enhancor/reference/{job_id}/{index}")
+def enhancor_reference(job_id: str, index: int, request: Request, db: Session = Depends(get_db)):
+    supplied = request.query_params.get("token") or ""
+    expected = enhancor.signed_token(f"image:{job_id}:{index}")
+    if not hmac.compare_digest(supplied, expected):
+        raise HTTPException(403, "Invalid reference token")
+    job = db.get(ProductJob, job_id)
+    batch = db.get(Batch, job.batch_id) if job else None
+    if not job or not batch or (batch.mode or "fashion_tryon") != "shoe_showcase":
+        raise HTTPException(404, "Shoe reference not found")
+    if index == 0:
+        if not job.approved or not job.image_media_id:
+            raise HTTPException(409, "Flow opener is not approved")
+        data, mime = tasks._asset_bytes(job.image_media_id, job.image_url or "")
+    elif 1 <= index <= len(job.selected_refs or []):
+        data, mime = sociavault.fetch_remote_image(job.selected_refs[index - 1])
+    else:
+        raise HTTPException(404, "Shoe reference not found")
+    jpeg, mime = useapi.normalize_image_bytes(data, mime)
+    if mime != "image/jpeg":
+        raise HTTPException(502, "Could not convert shoe reference to JPEG")
+    return Response(content=jpeg, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=3600"})
+
+
+@router.post("/api/enhancor/webhook/{job_id}")
+async def enhancor_webhook(job_id: str, request: Request, db: Session = Depends(get_db)):
+    supplied = request.query_params.get("token") or ""
+    expected = enhancor.signed_token(f"webhook:{job_id}")
+    if not hmac.compare_digest(supplied, expected):
+        raise HTTPException(403, "Invalid webhook token")
+    payload = await request.json()
+    job = db.get(ProductJob, job_id)
+    batch = db.get(Batch, job.batch_id) if job else None
+    if not job or not batch or (batch.mode or "fashion_tryon") != "shoe_showcase":
+        raise HTTPException(404, "Shoe job not found")
+    if not job.video_job_id or str(payload.get("request_id") or "") != str(job.video_job_id):
+        # Submission may not have committed yet. The scheduled poll is retained.
+        return {"accepted": False, "reason": "request ID not available"}
+    if str(job.video_status or "").lower() in {"completed", "failed"}:
+        return {"accepted": True}
+    if str(payload.get("status") or "").upper() in {"COMPLETED", "FAILED"}:
+        queued_poll = (
+            db.query(QueueTask)
+            .filter(QueueTask.job_id == job.id, QueueTask.task_type == "poll_video", QueueTask.status == "queued")
+            .order_by(QueueTask.created_at.desc())
+            .first()
+        )
+        if queued_poll:
+            queued_poll.run_after = tasks._now()
+            db.add(queued_poll)
+        db.commit()
+    return {"accepted": True}
 
 install_flow_account_affinity()
 install_video_provider_handlers()

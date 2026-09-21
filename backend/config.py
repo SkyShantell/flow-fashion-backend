@@ -30,6 +30,8 @@ class Settings:
     enhancor_api_key: str = os.getenv("ENHANCOR_API_KEY", "").strip()
     enhancor_base: str = os.getenv("ENHANCOR_BASE", "https://apireq.enhancor.ai/api/enhancor-video-pro/v1").strip().rstrip("/")
     seedance_black_video_url: str = os.getenv("SEEDANCE_BLACK_VIDEO_URL", "").strip()
+    enhancor_public_base_url: str = os.getenv("ENHANCOR_PUBLIC_BASE_URL", "").strip().rstrip("/")
+    enhancor_callback_secret: str = os.getenv("ENHANCOR_CALLBACK_SECRET", "").strip()
 
     # useapi / Flow
     flow_base: str = os.getenv("FLOW_BASE", "https://api.useapi.net/v1/google-flow").strip().rstrip("/")

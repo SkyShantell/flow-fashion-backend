@@ -61,17 +61,15 @@ def shoe_o1_video_prompt(job: ProductJob, *, creator_profile: str = "Female", re
 
 
 def _shoe_reference_urls(job: ProductJob) -> list[str]:
-    # The approved Flow opener is first; selected product photos follow in order.
-    opener = str(job.image_url or "").strip()
-    if not opener:
-        raise RuntimeError("The approved Flow opener has no image URL.")
-    urls = [opener]
-    seen: set[str] = set()
-    for raw_url in list(job.selected_refs or []):
+    # Serve every reference as JPEG; Enhancor rejects WebP product URLs.
+    if not job.image_media_id:
+        raise RuntimeError("The approved Flow opener is missing.")
+    urls = [enhancor.reference_url(job.id, 0)]
+    for index, raw_url in enumerate(list(job.selected_refs or []), start=1):
         url = str(raw_url or "").strip()
-        if url and url not in seen and url != opener:
-            urls.append(url)
-            seen.add(url)
+        if not url:
+            raise RuntimeError(f"Selected shoe reference {index} has no URL.")
+        urls.append(enhancor.reference_url(job.id, index))
     return urls
 
 
@@ -174,7 +172,11 @@ def _run_submit_shoe_o1(db: Session, task: QueueTask, job: ProductJob, batch: Ba
     db.flush()
 
     log.info("Submitting Seedance video · job=%s · images=%s", job.id, len(image_urls))
-    result = enhancor.submit_seedance_video(prompt_text, image_urls, start_video=cfg.seedance_black_video_url)
+    result = enhancor.submit_seedance_video(
+        prompt_text, image_urls,
+        start_video=cfg.seedance_black_video_url,
+        webhook_url=enhancor.webhook_url(job.id),
+    )
     job.video_job_id = result["job_id"]
     log.info("Enhancor requestId: %s", job.video_job_id)
     job.video_provider_used = "enhancor"
