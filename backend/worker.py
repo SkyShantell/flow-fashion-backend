@@ -8,7 +8,7 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
 from backend.config import settings
 from backend.db import init_db, session_scope
-from backend.models import QueueTask, utcnow
+from backend.models import ProductJob, QueueTask, utcnow
 from backend.tasks import claim_next_task, enqueue_missing_product_names, run_task_by_id
 from backend.flow_account_affinity import install_flow_account_affinity
 from backend.video_provider import install_video_provider_handlers
@@ -54,6 +54,9 @@ def main():
     with session_scope() as db:
         resumed_names = db.query(QueueTask).filter(QueueTask.task_type == "repair_product_name", QueueTask.status == "running").update({"status": "queued", "locked_at": None, "run_after": utcnow()}, synchronize_session=False)
         queued_names = enqueue_missing_product_names(db)
+        repair_states = {state: db.query(QueueTask).filter(QueueTask.task_type == "repair_product_name", QueueTask.status == state).count() for state in ("queued", "running", "done", "failed")}
+        unknown_count = db.query(ProductJob).filter(ProductJob.product_name == "Unknown Product").count()
+    log.info("Product title repair status · unknown=%s · queued=%s · running=%s · done=%s · failed=%s", unknown_count, repair_states["queued"], repair_states["running"], repair_states["done"], repair_states["failed"])
     if resumed_names:
         log.info("Resumed %s interrupted product title lookups", resumed_names)
     if queued_names:
