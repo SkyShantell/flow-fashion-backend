@@ -56,7 +56,10 @@ def main():
         queued_names = enqueue_missing_product_names(db)
         repair_states = {state: db.query(QueueTask).filter(QueueTask.task_type == "repair_product_name", QueueTask.status == state).count() for state in ("queued", "running", "done", "failed")}
         unknown_count = db.query(ProductJob).filter(ProductJob.product_name == "Unknown Product").count()
+        failure_examples = [row[0] for row in db.query(QueueTask.error).filter(QueueTask.task_type == "repair_product_name", QueueTask.status == "failed").distinct().limit(3)]
     log.info("Product title repair status · unknown=%s · queued=%s · running=%s · done=%s · failed=%s", unknown_count, repair_states["queued"], repair_states["running"], repair_states["done"], repair_states["failed"])
+    for failure in failure_examples:
+        log.warning("Product title repair failure example: %s", str(failure or "")[:240])
     if resumed_names:
         log.info("Resumed %s interrupted product title lookups", resumed_names)
     if queued_names:

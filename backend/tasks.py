@@ -248,6 +248,8 @@ def _fail_task(db: Session, task: QueueTask, error: str) -> None:
     task.error = str(error)[:4000]
     task.locked_at = None
     db.add(task)
+    if task.task_type == "repair_product_name":
+        return
     if not task.job_id:
         return
     job = db.get(ProductJob, task.job_id)
