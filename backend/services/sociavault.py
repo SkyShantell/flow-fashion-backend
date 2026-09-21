@@ -53,7 +53,7 @@ def product_title(data: dict) -> str:
 
 
 def lookup_product_name(url: str, region: str = "US") -> str:
-    data = sociavault_get(SOCIA_PRODUCT_DETAILS, {"url": url, "get_related_videos": "false", "region": region})
+    data = sociavault_get(SOCIA_PRODUCT_DETAILS, {"url": url, "get_related_videos": "false", "region": region}, timeout=20)
     return product_title(data)
 
 
@@ -140,11 +140,11 @@ def dedupe(items):
     return out
 
 
-def sociavault_get(endpoint: str, params: dict) -> dict:
+def sociavault_get(endpoint: str, params: dict, *, timeout: int = 90) -> dict:
     cfg = settings()
     if not cfg.sociavault_api_key:
         raise RuntimeError("Missing SOCIAVAULT_API_KEY")
-    resp = requests.get(endpoint, headers={"X-API-Key": cfg.sociavault_api_key, "Accept": "application/json"}, params=params, timeout=90)
+    resp = requests.get(endpoint, headers={"X-API-Key": cfg.sociavault_api_key, "Accept": "application/json"}, params=params, timeout=timeout)
     if resp.status_code >= 400:
         raise RuntimeError(f"SociaVault HTTP {resp.status_code}: {parse_error(resp)}")
     payload = resp.json()

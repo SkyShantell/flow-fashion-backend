@@ -51,6 +51,7 @@ def _resolve_missing_name(job: ProductJob, db: Session, region: str, *, retry_so
         return name
     if retry_sociavault:
         try:
+            log.info("Looking up SociaVault title · job=%s", job.id)
             name = sociavault.lookup_product_name(job.product_url, region)
         except Exception as exc:
             log.warning("SociaVault title lookup failed · job=%s · %s", job.id, str(exc)[:250])
@@ -58,6 +59,7 @@ def _resolve_missing_name(job: ProductJob, db: Session, region: str, *, retry_so
             return name
     if region == "US" and settings().tikhub_api_key:
         try:
+            log.info("Looking up TikHub title · job=%s", job.id)
             name = tikhub.lookup_product_name(job.product_url, region)
         except Exception as exc:
             log.warning("TikHub title lookup failed · job=%s · %s", job.id, str(exc)[:250])
@@ -73,6 +75,7 @@ def run_repair_product_name(db: Session, task: QueueTask) -> None:
     region = str(job.sociavault_region or "US").strip().upper()
     if region == "UK":
         region = "GB"
+    log.info("Repairing missing product title · job=%s · region=%s", job.id, region)
     name = _resolve_missing_name(job, db, region, retry_sociavault=True)
     if name == "Unknown Product":
         log.warning("Product title unavailable from linked sources · job=%s · region=%s", job.id, region)
@@ -307,6 +310,9 @@ def claim_next_task(db: Session) -> QueueTask | None:
     QueueTask.created_at.asc(),
 )
     )
+    # Leave three worker slots for imports and generation when a metadata lookup stalls.
+    if db.query(QueueTask.id).filter(QueueTask.task_type == "repair_product_name", QueueTask.status == "running").first():
+        query = query.filter(QueueTask.task_type != "repair_product_name")
     try:
         query = query.with_for_update(skip_locked=True)
     except Exception:

@@ -51,7 +51,7 @@ def extract_product_id(url: str) -> str:
     raise RuntimeError("Could not extract a TikTok Shop product ID from this URL for TikHub.")
 
 
-def _get(endpoint: str, params: dict) -> dict:
+def _get(endpoint: str, params: dict, *, timeout: int = 35, max_attempts: int = 3) -> dict:
     cfg = settings()
     if not cfg.tikhub_api_key:
         raise RuntimeError("Missing TIKHUB_API_KEY")
@@ -62,10 +62,10 @@ def _get(endpoint: str, params: dict) -> dict:
         "User-Agent": "FlowFashion/1.0",
     }
     last_error = ""
-    for attempt in range(3):
+    for attempt in range(max_attempts):
         try:
-            resp = requests.get(endpoint, headers=headers, params=params, timeout=35)
-            if resp.status_code == 400 and attempt < 2:
+            resp = requests.get(endpoint, headers=headers, params=params, timeout=timeout)
+            if resp.status_code == 400 and attempt < max_attempts - 1:
                 time.sleep(1.5 * (attempt + 1))
                 continue
             if resp.status_code >= 400:
@@ -83,7 +83,7 @@ def _get(endpoint: str, params: dict) -> dict:
             return data if isinstance(data, dict) else {"items": data}
         except Exception as exc:
             last_error = str(exc)
-            if attempt < 2 and ("HTTP 400" in last_error or "timed out" in last_error.lower() or "timeout" in last_error.lower()):
+            if attempt < max_attempts - 1 and ("HTTP 400" in last_error or "timed out" in last_error.lower() or "timeout" in last_error.lower()):
                 time.sleep(1.5 * (attempt + 1))
                 continue
             break
@@ -205,7 +205,7 @@ def lookup_product_name(url: str, region: str = "US") -> str:
     if region_code != "US":
         return "Unknown Product"
     product_id = extract_product_id(url)
-    data = _get(DETAIL_V3, {"product_id": product_id, "region": region_code})
+    data = _get(DETAIL_V3, {"product_id": product_id, "region": region_code}, timeout=20, max_attempts=2)
     product = data.get("productInfo") or data.get("product_info") or {}
     if not isinstance(product, dict):
         return "Unknown Product"

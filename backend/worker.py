@@ -8,6 +8,7 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
 from backend.config import settings
 from backend.db import init_db, session_scope
+from backend.models import QueueTask, utcnow
 from backend.tasks import claim_next_task, enqueue_missing_product_names, run_task_by_id
 from backend.flow_account_affinity import install_flow_account_affinity
 from backend.video_provider import install_video_provider_handlers
@@ -51,7 +52,10 @@ def main():
     # the user's manual button on both Fashion Try-On and Shoe Showcase jobs.
     install_manual_ffmpeg_handler()
     with session_scope() as db:
+        resumed_names = db.query(QueueTask).filter(QueueTask.task_type == "repair_product_name", QueueTask.status == "running").update({"status": "queued", "locked_at": None, "run_after": utcnow()}, synchronize_session=False)
         queued_names = enqueue_missing_product_names(db)
+    if resumed_names:
+        log.info("Resumed %s interrupted product title lookups", resumed_names)
     if queued_names:
         log.info("Queued %s missing product titles for recovery", queued_names)
     cfg = settings()
