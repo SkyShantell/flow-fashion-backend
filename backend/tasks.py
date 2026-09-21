@@ -1388,6 +1388,7 @@ def run_task_by_id(task_id: str) -> str:
         if not handler:
             _fail_task(db, task, f"Unknown task type: {task.task_type}")
             return "failed"
+        is_title_repair = task.task_type == "repair_product_name"
         try:
             handler(db, task)
             task.status = "done"
@@ -1398,6 +1399,16 @@ def run_task_by_id(task_id: str) -> str:
             return "done"
         except Exception as exc:
             error = str(exc)
+            if is_title_repair:
+                # A database deadlock during an API/worker rollout invalidates this
+                # session. Reset it before requeueing this read-only metadata job.
+                db.rollback()
+                task = db.get(QueueTask, task_id)
+                if not task:
+                    return "missing"
+                task.attempts = max(0, int(task.attempts or 0) - 1)
+                _requeue(db, task, error, delay_seconds=15)
+                return "requeued title repair · " + error[:300]
             summary = (
                 f"type={task.task_type} · job={task.job_id or '-'} · "
                 f"attempt={task.attempts}/{task.max_attempts} · error={error[:1800]}"
