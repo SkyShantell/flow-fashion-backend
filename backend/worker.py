@@ -52,6 +52,18 @@ def main():
     # the user's manual button on both Fashion Try-On and Shoe Showcase jobs.
     install_manual_ffmpeg_handler()
     with session_scope() as db:
+        interrupted_repairs = db.query(QueueTask).filter(QueueTask.task_type == "repair_product_name", QueueTask.status == "failed", QueueTask.error == "Unknown task type: repair_product_name").all()
+        for repair in interrupted_repairs:
+            job = db.get(ProductJob, repair.job_id) if repair.job_id else None
+            if job:
+                job.failure_count = max(0, int(job.failure_count or 0) - 1)
+                db.add(job)
+            repair.status = "queued"
+            repair.attempts = 0
+            repair.error = None
+            repair.locked_at = None
+            repair.run_after = utcnow()
+            db.add(repair)
         resumed_names = db.query(QueueTask).filter(QueueTask.task_type == "repair_product_name", QueueTask.status == "running").update({"status": "queued", "locked_at": None, "run_after": utcnow()}, synchronize_session=False)
         queued_names = enqueue_missing_product_names(db)
         repair_states = {state: db.query(QueueTask).filter(QueueTask.task_type == "repair_product_name", QueueTask.status == state).count() for state in ("queued", "running", "done", "failed")}
@@ -60,6 +72,8 @@ def main():
     log.info("Product title repair status · unknown=%s · queued=%s · running=%s · done=%s · failed=%s", unknown_count, repair_states["queued"], repair_states["running"], repair_states["done"], repair_states["failed"])
     for failure in failure_examples:
         log.warning("Product title repair failure example: %s", str(failure or "")[:240])
+    if interrupted_repairs:
+        log.info("Requeued %s title repairs rejected by the previous worker version", len(interrupted_repairs))
     if resumed_names:
         log.info("Resumed %s interrupted product title lookups", resumed_names)
     if queued_names:
