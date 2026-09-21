@@ -50,12 +50,12 @@ def shoe_o1_video_prompt(job: ProductJob, *, creator_profile: str = "Female", re
 
     hand = "woman's hand" if str(creator_profile or "Female").lower().startswith("f") else "man's hand"
     return _clean_prompt(f"""
-        9:16 vertical, 5 seconds. Use the supplied approved Flow start image @image_1 as the exact first frame. The opening moment must perfectly match @image_1 before motion begins. {extra_rule}
+        9:16 vertical, 8 seconds. Use the supplied approved Flow start image @image_1 as the exact first frame. The opening moment must perfectly match @image_1 before motion begins. {extra_rule}
         Preserve the exact {product} from @image_1 throughout the entire video: exact color, materials, silhouette, toe shape, sole and tread, heel, stitching, laces or closures, hardware, physical branding and proportions. Never redesign, recolor, morph, duplicate or invent product features.
         Environment: the same dark luxury car interior from @image_1 with black leather seating and subtle gloss-black, chrome or premium trim. Moody ambient lighting. Keep the shoe large and the visual priority. Premium editorial TikTok Shop look with natural phone-camera realism.
         SHOT 1 · 0:00–0:02: Start exactly on @image_1. Immediately after the opening moment, the {hand} naturally lifts, tilts and repositions the shoe with clear controlled energy. A subtle camera push or reframe is allowed.
-        CUT · SHOT 2 · 0:02–0:04: New angle in the same luxury-car visual world. Show an active product showcase: hand-held rotation or an on-foot angle, whichever best suits the shoe. Clearly reveal the front-to-side profile and upper shape. Movement should feel intentional, stylish and physically realistic.
-        CUT · SHOT 3 · 0:04–0:05: Close detail and hero finish. Reveal a useful detail that truly exists on the product, such as sole edge or tread, heel, stitching, tongue, lace area, zipper, lining or texture. Finish on a strong three-quarter hero angle.
+        CUT · SHOT 2 · 0:02–0:05: New angle in the same luxury-car visual world. Show an active product showcase: hand-held rotation or an on-foot angle, whichever best suits the shoe. Clearly reveal the front-to-side profile and upper shape. Movement should feel intentional, stylish and physically realistic.
+        CUT · SHOT 3 · 0:05–0:08: Close detail and hero finish. Reveal a useful detail that truly exists on the product, such as sole edge or tread, heel, stitching, tongue, lace area, zipper, lining or texture. Finish on a strong three-quarter hero angle.
         No face reveal. No upper body. If hand-held, show no person above the forearm. If on-foot, keep framing product-focused. No extra people. Silent. No generated text, captions, subtitles, watermarks or added logos. No color changes or made-up features.
     """)[:1700]
 
@@ -237,11 +237,11 @@ def _run_poll_shoe_o1(db: Session, task: QueueTask, job: ProductJob, batch: Batc
 
         job.video_source_url = final_url
         job.video_url = final_url
-        job.video_source_resolution = settings().video_final_resolution
-        job.video_resolution = settings().video_final_resolution
+        job.video_source_resolution = "720p"
+        job.video_resolution = "720p"
         job.video_provider_used = "enhancor"
         job.video_status = "completed"
-        # Seedance 1080p is final; do not send it through the Google Flow upscale path.
+        # Seedance 720p is final; do not send it through the Google Flow upscale path.
         job.upscale_status = "completed"
         job.upscale_error = None
         job.video_error = None

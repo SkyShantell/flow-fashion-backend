@@ -45,7 +45,7 @@ def submit_seedance_video(
     product_images: list[str],
     start_video: str,
     webhook_url: str = "",
-    duration: str = "5",
+    duration: str = "8",
 ) -> dict:
     cfg = settings()
     if not cfg.enhancor_api_key:
@@ -62,10 +62,12 @@ def submit_seedance_video(
         "mode": "multi_reference",
         "prompt": prompt,
         "duration": duration,
-        "resolution": "1080p",
+        "resolution": "720p",
         "aspect_ratio": "9:16",
         "images": product_images,
-        "fast_mode": False,
+        "fast_mode": True,
+        "full_access": False,
+        "is_uncensored": False,
         "videos": [start_video],
         "webhook_url": webhook_url,
     }
