@@ -547,8 +547,20 @@ def run_import_product(db: Session, task: QueueTask) -> None:
                     if scanner_image:
                         scanner_images = [scanner_image]
             if not scanner_images:
+                try:
+                    page_name, page_image = sociavault.tiktok_page_product_image(job.product_url)
+                    if page_image:
+                        # Confirm that the page image can actually be used as a Flow reference.
+                        sociavault.fetch_remote_image(page_image)
+                        scanner_images = [page_image]
+                        if scanner_name == "Unknown Product":
+                            scanner_name = page_name
+                        log.info("Using public TikTok product image · job=%s · region=GB", job.id)
+                except Exception as exc:
+                    log.warning("Public TikTok product image unavailable · job=%s · %s", job.id, str(exc)[:250])
+            if not scanner_images:
                 raise RuntimeError(
-                    "TikHub could not resolve this UK product and the Scanner fallback has no product image. "
+                    "TikHub could not resolve this UK product; neither Scanner nor the public product page provided a usable image. "
                     + str(tikhub_exc)[:600]
                 )
             try:

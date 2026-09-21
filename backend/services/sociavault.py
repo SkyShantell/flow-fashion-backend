@@ -103,6 +103,50 @@ def tiktok_page_title(url: str) -> str:
     return "Unknown Product"
 
 
+def tiktok_page_product_image(url: str) -> tuple[str, str]:
+    """Read a product's public TikTok metadata when regional gallery APIs are empty."""
+    class ProductParser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.title = ""
+            self.image = ""
+
+        def handle_starttag(self, tag, attrs):
+            if tag != "meta":
+                return
+            values = dict(attrs)
+            key = values.get("property") or values.get("name")
+            if key in {"og:title", "twitter:title"}:
+                self.title = values.get("content") or self.title
+            elif key in {"og:image", "twitter:image"}:
+                self.image = values.get("content") or self.image
+
+    current = str(url or "").strip()
+    headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/151 Safari/537.36", "Accept": "text/html"}
+    for _ in range(3):
+        parsed = urlsplit(current)
+        host = (parsed.hostname or "").lower()
+        if parsed.scheme not in {"http", "https"} or not (host == "tiktok.com" or host.endswith(".tiktok.com")):
+            return "Unknown Product", ""
+        response = requests.get(current, headers=headers, timeout=(4, 9), allow_redirects=False)
+        if response.status_code in {301, 302, 303, 307, 308}:
+            current = urljoin(current, response.headers.get("Location") or "")
+            continue
+        if response.status_code >= 400:
+            return "Unknown Product", ""
+        parser = ProductParser()
+        parser.feed(response.text[:1_000_000])
+        title = html.unescape(parser.title).strip()
+        title = re.sub(r"\s*[|\-]\s*TikTok(?: Shop)?\s*$", "", title, flags=re.I).strip()
+        image = normalize_remote_url(parser.image)
+        if len(title) < 8 or title.lower() in {"tiktok shop", "tiktok - make your day", "shop on tiktok"}:
+            return "Unknown Product", ""
+        if not image or any(x in image.lower() for x in ("tiktok-logo", "tiktok_logo")):
+            return title, ""
+        return title, image
+    return "Unknown Product", ""
+
+
 def normalize_remote_url(value) -> str:
     if value is None:
         return ""
