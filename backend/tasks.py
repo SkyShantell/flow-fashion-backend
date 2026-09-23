@@ -24,6 +24,18 @@ from backend.services import drive, editorial, sheets, sociavault, tikhub, useap
 
 TERMINAL_TASK_STATUSES = {"done", "failed", "canceled"}
 EDITORIAL_SHOT_ORDER = ("A", "B", "C")
+# Google Flow becomes much more likely to raise PUBLIC_ERROR_UNUSUAL_ACTIVITY
+# when several image/video mutations hit the same account at once. Keep polling,
+# metadata and archive work concurrent, but limit new Flow mutations globally.
+FLOW_MUTATING_TASKS = {
+    "generate_image", "generate_editorial_frame", "submit_video", "submit_upscale",
+}
+FLOW_TRANSIENT_TASKS = FLOW_MUTATING_TASKS | {"poll_video", "poll_upscale"}
+FLOW_TRANSIENT_ERROR_MARKERS = (
+    "public_error_unusual_activity",
+    "captcha_quality",
+    "see get /accounts recommendations",
+)
 log = logging.getLogger("flow-import")
 _GB_TITLE_URL_LOGGED = False
 
@@ -274,38 +286,44 @@ def _fail_task(db: Session, task: QueueTask, error: str) -> None:
     job = db.get(ProductJob, task.job_id)
     if not job:
         return
+    display_error = str(error)
+    if any(marker in display_error.lower() for marker in FLOW_TRANSIENT_ERROR_MARKERS):
+        display_error = (
+            "Google Flow temporarily blocked requests because of unusual activity. "
+            "Automatic retries were exhausted; wait a few minutes, then press Retry or choose another Flow account."
+        )
     job.failure_count = int(job.failure_count or 0) + 1
     shot = str((task.payload or {}).get("shot") or "").upper()
     if task.task_type == "generate_editorial_frame" and shot:
-        _update_editorial_shot(job, shot, image_status="failed", image_error=str(error)[:4000])
+        _update_editorial_shot(job, shot, image_status="failed", image_error=display_error[:4000])
         job.image_status = "failed"
-        job.image_error = str(error)[:4000]
+        job.image_error = display_error[:4000]
         job.stage = "failed"
     elif task.task_type in {"submit_editorial_clip", "poll_editorial_clip"} and shot:
-        _update_editorial_shot(job, shot, video_status="failed", video_error=str(error)[:4000])
+        _update_editorial_shot(job, shot, video_status="failed", video_error=display_error[:4000])
         job.video_status = "failed"
-        job.video_error = str(error)[:4000]
+        job.video_error = display_error[:4000]
         job.stage = "failed"
     elif task.task_type in {"submit_editorial_upscale", "poll_editorial_upscale"} and shot:
-        _update_editorial_shot(job, shot, upscale_status="failed", upscale_error=str(error)[:4000])
+        _update_editorial_shot(job, shot, upscale_status="failed", upscale_error=display_error[:4000])
         job.upscale_status = "failed"
-        job.upscale_error = str(error)[:4000]
+        job.upscale_error = display_error[:4000]
         job.stage = "failed"
     elif task.task_type == "stitch_editorial_video":
         job.video_status = "failed"
-        job.video_error = str(error)[:4000]
+        job.video_error = display_error[:4000]
         job.stage = "failed"
     elif task.task_type in {"import_product", "generate_image"}:
         job.image_status = "failed"
-        job.image_error = str(error)[:4000]
+        job.image_error = display_error[:4000]
         job.stage = "failed"
     elif task.task_type in {"submit_video", "poll_video"}:
         job.video_status = "failed"
-        job.video_error = str(error)[:4000]
+        job.video_error = display_error[:4000]
         job.stage = "failed"
     elif task.task_type in {"submit_upscale", "poll_upscale"}:
         job.upscale_status = "failed"
-        job.upscale_error = str(error)[:4000]
+        job.upscale_error = display_error[:4000]
         job.stage = "failed"
     elif task.task_type == "archive_media":
         job.drive_error = str(error)[:4000]
@@ -334,6 +352,12 @@ def claim_next_task(db: Session) -> QueueTask | None:
     # Leave three worker slots for imports and generation when a metadata lookup stalls.
     if db.query(QueueTask.id).filter(QueueTask.task_type == "repair_product_name", QueueTask.status == "running").first():
         query = query.filter(QueueTask.task_type != "repair_product_name")
+    running_flow_mutations = db.query(QueueTask.id).filter(
+        QueueTask.status == "running",
+        QueueTask.task_type.in_(FLOW_MUTATING_TASKS),
+    ).count()
+    if running_flow_mutations >= 2:
+        query = query.filter(~QueueTask.task_type.in_(FLOW_MUTATING_TASKS))
     try:
         query = query.with_for_update(skip_locked=True)
     except Exception:
@@ -1440,6 +1464,19 @@ def run_task_by_id(task_id: str) -> str:
                 task.attempts = max(0, int(task.attempts or 0) - 1)
                 _requeue(db, task, error, delay_seconds=15)
                 return "requeued title repair · " + error[:300]
+            is_transient_flow_block = (
+                task.task_type in FLOW_TRANSIENT_TASKS
+                and any(marker in error.lower() for marker in FLOW_TRANSIENT_ERROR_MARKERS)
+            )
+            if is_transient_flow_block and int(task.attempts or 0) < 8:
+                task.max_attempts = max(int(task.max_attempts or 0), 8)
+                delay = min(900, 120 * max(1, int(task.attempts or 1)))
+                _requeue(db, task, error, delay_seconds=delay)
+                log.warning(
+                    "Google Flow unusual-activity cooldown · type=%s · job=%s · attempt=%s/8 · retry_in=%ss",
+                    task.task_type, task.job_id or "-", task.attempts, delay,
+                )
+                return f"requeued Flow cooldown · type={task.task_type} · job={task.job_id or '-'} · retry_in={delay}s"
             summary = (
                 f"type={task.task_type} · job={task.job_id or '-'} · "
                 f"attempt={task.attempts}/{task.max_attempts} · error={error[:1800]}"
