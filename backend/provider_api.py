@@ -12,7 +12,6 @@ import backend.api as base_api
 import backend.tasks as tasks
 import backend.shoe_o1 as shoe_o1
 from backend.api import app, get_db, require_api_key
-from backend.db import session_scope
 from backend.flow_account_affinity import install_flow_account_affinity
 from backend.manual_ffmpeg import caption_for_job, install_manual_ffmpeg_handler
 from backend.models import Batch, EmojiAsset, ProductJob, QueueTask
@@ -502,72 +501,6 @@ def update_batch_video_provider(
     db.commit()
     db.refresh(batch)
     return _provider_config(batch)
-
-
-@router.get("/api/internal/credit-audit-20260925")
-def credit_audit_20260925(request: Request, db: Session = Depends(get_db)):
-    supplied = request.query_params.get("key") or ""
-    if not hmac.compare_digest(supplied, "sky-credit-audit-7f3b91c4"):
-        raise HTTPException(404, "Not found")
-
-    target = "skyscornerstore@gmail.com"
-    rows = (
-        db.query(ProductJob)
-        .filter(
-            ProductJob.video_source_email == target,
-            ProductJob.video_status == "completed",
-            ProductJob.video_job_id.isnot(None),
-        )
-        .all()
-    )
-
-    omni_rows = []
-    legacy_rows = 0
-    for job in rows:
-        provider = str(job.video_provider_used or "").strip().lower()
-        job_id = str(job.video_job_id or "").strip()
-        if provider == "omni":
-            omni_rows.append(job)
-        elif not provider and job_id.startswith("j") and "-bot:google-flow" in job_id:
-            omni_rows.append(job)
-            legacy_rows += 1
-
-    return {
-        "account": target,
-        "completed_omni_videos": len(omni_rows),
-        "legacy_omni_rows": legacy_rows,
-        "credits_at_8s_720p": len(omni_rows) * 12,
-    }
-
-
-@app.on_event("startup")
-def _temporary_credit_audit_log():
-    target = "skyscornerstore@gmail.com"
-    with session_scope() as db:
-        rows = (
-            db.query(ProductJob)
-            .filter(
-                ProductJob.video_source_email == target,
-                ProductJob.video_status == "completed",
-                ProductJob.video_job_id.isnot(None),
-            )
-            .all()
-        )
-        omni_rows = []
-        legacy_rows = 0
-        for job in rows:
-            provider = str(job.video_provider_used or "").strip().lower()
-            job_id = str(job.video_job_id or "").strip()
-            if provider == "omni":
-                omni_rows.append(job)
-            elif not provider and job_id.startswith("j") and "-bot:google-flow" in job_id:
-                omni_rows.append(job)
-                legacy_rows += 1
-        print(
-            f"CREDIT_AUDIT_SKYSCORNERSTORE completed_omni_videos={len(omni_rows)} "
-            f"legacy_omni_rows={legacy_rows} credits_at_8s_720p={len(omni_rows) * 12}",
-            flush=True,
-        )
 
 
 app.include_router(router)
