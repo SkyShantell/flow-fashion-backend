@@ -307,7 +307,7 @@ class FlowPovClient:
         prompt: str,
         product_media_ids: list[str],
         email: str,
-        model: str = "nano-banana-2",
+        model: str = "nano-banana-pro",
     ) -> dict[str, Any]:
         refs = [str(value).strip() for value in product_media_ids if str(value).strip()][:4]
         if not refs:
@@ -359,7 +359,9 @@ class FlowPovClient:
         email: str,
         deadline_seconds: int = 90,
     ) -> dict[str, Any]:
-        model = "nano-banana-2"
+        # Shoes POV is intentionally locked to the heavier model. Do not silently
+        # downgrade future renders to nano-banana-2 or nano-banana-2-lite.
+        model = "nano-banana-pro"
         for attempt in range(2):
             try:
                 submitted = self.submit_image(prompt=prompt, product_media_ids=product_media_ids, email=email, model=model)
