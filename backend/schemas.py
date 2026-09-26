@@ -113,6 +113,9 @@ class ApplyTextOverlayRequest(BaseModel):
     headline_color: str = "white"
     subheadline_color: str = "white"
     placement: str = "middle"
+    text_scale: float = Field(default=0.65, ge=0.40, le=1.30)
+    position_x: float = Field(default=0.50, ge=0.08, le=0.92)
+    position_y: float = Field(default=0.46, ge=0.08, le=0.92)
 
 
 class EmojiSeedRequest(BaseModel):

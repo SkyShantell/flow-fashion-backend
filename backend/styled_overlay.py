@@ -190,6 +190,7 @@ def _inline_headline(
     draw: ImageDraw.ImageDraw,
     *,
     y: int,
+    center_x: int,
     text: str,
     font: ImageFont.FreeTypeFont,
     color: str,
@@ -209,7 +210,7 @@ def _inline_headline(
         group_w += sum(img.width for img in prefix_images) + gap * len(prefix_images)
     if suffix_images:
         group_w += sum(img.width for img in suffix_images) + gap * len(suffix_images)
-    x = max(20, int((canvas.width - group_w) / 2))
+    x = max(20, min(int(center_x - group_w / 2), canvas.width - group_w - 20))
     mid_y = y + max(text_h, emoji_size) // 2
 
     for img in prefix_images:
@@ -266,6 +267,9 @@ def render_styled_overlay(
     headline_color: str = "white",
     subheadline_color: str = "white",
     placement: str = "middle",
+    text_scale: float = 0.65,
+    position_x: float = 0.50,
+    position_y: float | None = None,
 ) -> bytes:
     if not video_bytes:
         raise RuntimeError("No video bytes were supplied to the styled overlay renderer.")
@@ -281,6 +285,18 @@ def render_styled_overlay(
     h_color = COLORS.get(str(headline_color or "white"), COLORS["white"])
     s_color = COLORS.get(str(subheadline_color or "white"), COLORS["white"])
     placement_ratio = PLACEMENTS.get(str(placement or "middle"), PLACEMENTS["middle"])
+    try:
+        scale_multiplier = max(0.40, min(1.30, float(text_scale)))
+    except (TypeError, ValueError):
+        scale_multiplier = 0.65
+    try:
+        center_x_ratio = max(0.08, min(0.92, float(position_x)))
+    except (TypeError, ValueError):
+        center_x_ratio = 0.50
+    try:
+        center_y_ratio = placement_ratio if position_y is None else max(0.08, min(0.92, float(position_y)))
+    except (TypeError, ValueError):
+        center_y_ratio = placement_ratio
 
     with tempfile.TemporaryDirectory(prefix="flow_styled_overlay_") as temp_dir:
         root = Path(temp_dir)
@@ -302,7 +318,7 @@ def render_styled_overlay(
             draw,
             headline,
             str(style["headline_font"]),
-            int(height * float(style["headline_scale"])),
+            int(height * float(style["headline_scale"]) * scale_multiplier),
             max_width,
             stroke_width,
         )
@@ -310,7 +326,7 @@ def render_styled_overlay(
             draw,
             subheadline,
             str(style["subheadline_font"]),
-            int(height * float(style["subheadline_scale"])),
+            int(height * float(style["subheadline_scale"]) * scale_multiplier),
             max_width,
             stroke_width,
         ) if subheadline else None
@@ -321,13 +337,15 @@ def render_styled_overlay(
         headline_block_h = max(headline_h, emoji_size if (emoji_prefix or emoji_suffix) else headline_h)
         line_gap = max(8, int(height * 0.006)) if subheadline else 0
         total_h = headline_block_h + line_gap + sub_h
-        top_y = int(height * placement_ratio - total_h / 2)
+        center_x = int(width * center_x_ratio)
+        top_y = int(height * center_y_ratio - total_h / 2)
         top_y = max(int(height * 0.08), min(top_y, height - total_h - int(height * 0.08)))
 
         used_h = _inline_headline(
             canvas,
             draw,
             y=top_y,
+            center_x=center_x,
             text=headline,
             font=headline_font,
             color=h_color,
@@ -341,7 +359,7 @@ def render_styled_overlay(
 
         if subheadline and sub_font:
             sub_w, _ = _text_size(draw, subheadline, sub_font, stroke_width)
-            sub_x = max(20, int((width - sub_w) / 2))
+            sub_x = max(20, min(int(center_x - sub_w / 2), width - sub_w - 20))
             draw.text(
                 (sub_x, top_y + used_h + line_gap),
                 subheadline,

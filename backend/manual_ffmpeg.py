@@ -17,6 +17,13 @@ _INSTALLED = False
 _ORIGINAL_ARCHIVE_MEDIA: Callable[[Session, QueueTask], None] | None = None
 
 
+def _bounded_float(value, default: float, minimum: float, maximum: float) -> float:
+    try:
+        return max(minimum, min(maximum, float(value)))
+    except (TypeError, ValueError):
+        return default
+
+
 def caption_for_job(job: ProductJob) -> str:
     """Return the selected/default hook as the starting text in the manual style editor."""
     return text_overlay._fashion_caption(job)
@@ -130,11 +137,17 @@ def run_apply_text_overlay(db: Session, task: QueueTask) -> None:
         headline_color = str(payload.get("headline_color") or "white").strip()[:30]
         subheadline_color = str(payload.get("subheadline_color") or "white").strip()[:30]
         placement = str(payload.get("placement") or "middle").strip()[:20]
+        text_scale = _bounded_float(payload.get("text_scale"), 0.65, 0.40, 1.30)
+        position_x = _bounded_float(payload.get("position_x"), 0.50, 0.08, 0.92)
+        position_y = _bounded_float(payload.get("position_y"), 0.46, 0.08, 0.92)
 
         log.info(
-            "Manual styled FFmpeg started · job=%s · preset=%s · headline=%s · apple_emoji=%s · redo=%s",
+            "Manual styled FFmpeg started · job=%s · preset=%s · scale=%.2f · position=%.2f,%.2f · headline=%s · apple_emoji=%s · redo=%s",
             job.id,
             preset,
+            text_scale,
+            position_x,
+            position_y,
             headline,
             bool(emoji_prefix_pngs or emoji_suffix_pngs),
             bool(payload.get("redo")),
@@ -155,6 +168,9 @@ def run_apply_text_overlay(db: Session, task: QueueTask) -> None:
             headline_color=headline_color,
             subheadline_color=subheadline_color,
             placement=placement,
+            text_scale=text_scale,
+            position_x=position_x,
+            position_y=position_y,
         )
         # The styled renderer always emits a true 1080x1920 final file, including
         # 720p Seedance sources. Set this before any Drive fallback chooses a filename.
@@ -233,6 +249,9 @@ def run_apply_text_overlay(db: Session, task: QueueTask) -> None:
             "fashion_text_overlay_headline_color": headline_color,
             "fashion_text_overlay_subheadline_color": subheadline_color,
             "fashion_text_overlay_placement": placement,
+            "fashion_text_overlay_scale": text_scale,
+            "fashion_text_overlay_position_x": position_x,
+            "fashion_text_overlay_position_y": position_y,
             "fashion_text_overlay_media_id": final_media_id,
             "fashion_text_overlay_storage": storage_mode,
             "fashion_text_overlay_url": final_url,

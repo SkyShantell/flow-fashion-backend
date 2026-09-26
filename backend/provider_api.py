@@ -239,7 +239,7 @@ def _active_overlay_task(db: Session, job: ProductJob) -> QueueTask | None:
 
 
 @router.get("/jobs/{job_id}/download-video", dependencies=[Depends(require_api_key)])
-def download_final_video(job_id: str, db: Session = Depends(get_db)):
+def download_final_video(job_id: str, request: Request, db: Session = Depends(get_db)):
     job = db.get(ProductJob, job_id)
     if not job:
         raise HTTPException(404, "Job not found")
@@ -251,11 +251,12 @@ def download_final_video(job_id: str, db: Session = Depends(get_db)):
         raise HTTPException(404, "Video file is not available")
 
     base_name = re.sub(r"[^A-Za-z0-9._-]+", "-", str(job.product_name or "video")).strip("-._")[:80] or "video"
+    preview = str(request.query_params.get("preview") or "").strip().lower() in {"1", "true", "yes"}
     return Response(
         content=video_bytes,
         media_type="video/mp4",
         headers={
-            "Content-Disposition": f'attachment; filename="{base_name}.mp4"',
+            "Content-Disposition": f'{"inline" if preview else "attachment"}; filename="{base_name}.mp4"',
             "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
             "Pragma": "no-cache",
         },
@@ -282,6 +283,8 @@ def text_overlay_config(job_id: str, db: Session = Depends(get_db)):
     batch = db.get(Batch, job.batch_id)
     shoe_mode = bool(batch and (batch.mode or "fashion_tryon") == "shoe_showcase")
     previous = _latest_completed_overlay_payload(db, job)
+    placement = str(previous.get("placement") or "middle")
+    default_y = {"upper": 0.24, "middle": 0.46, "lower": 0.68}.get(placement, 0.46)
     return {
         "headline": str(previous.get("headline") or caption_for_job(job)),
         "headline_options": caption_options_for_job(job),
@@ -291,7 +294,10 @@ def text_overlay_config(job_id: str, db: Session = Depends(get_db)):
         "emoji_suffix": str(previous.get("emoji_suffix") or ""),
         "headline_color": str(previous.get("headline_color") or "white"),
         "subheadline_color": str(previous.get("subheadline_color") or "white"),
-        "placement": str(previous.get("placement") or "middle"),
+        "placement": placement,
+        "text_scale": float(previous.get("text_scale") or 0.65),
+        "position_x": float(previous.get("position_x") or 0.50),
+        "position_y": float(previous.get("position_y") or default_y),
         **overlay_options(),
         "emoji_mode": "server_apple_cache",
         "is_redo": bool(previous),
@@ -411,6 +417,9 @@ def apply_text_overlay(
             "headline_color": str(request.headline_color or "white")[:30],
             "subheadline_color": str(request.subheadline_color or "white")[:30],
             "placement": str(request.placement or "middle")[:20],
+            "text_scale": float(request.text_scale),
+            "position_x": float(request.position_x),
+            "position_y": float(request.position_y),
         },
         priority=75,
         max_attempts=2,
