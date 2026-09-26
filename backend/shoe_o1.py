@@ -241,8 +241,9 @@ def _run_poll_shoe_o1(db: Session, task: QueueTask, job: ProductJob, batch: Batc
         job.video_resolution = "720p"
         job.video_provider_used = "enhancor"
         job.video_status = "completed"
-        # Seedance 720p is final; do not send it through the Google Flow upscale path.
-        job.upscale_status = "completed"
+        # Seedance returns 720p. The mandatory manual FFmpeg pass normalizes the final
+        # captioned export to 1080x1920, so keep 1080p pending until that pass succeeds.
+        job.upscale_status = "pending"
         job.upscale_error = None
         job.video_error = None
         job.stage = "video_complete"

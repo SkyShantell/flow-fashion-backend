@@ -66,8 +66,14 @@ def _fashion_hook_profile(job: ProductJob) -> tuple[str, str]:
         return "top", "hoodie season >>>"
     if "dress" in raw:
         return "dress", "the perfect everyday dress"
+    if "skirt" in raw:
+        return "skirt", "the perfect everyday skirt"
+    if "shorts" in raw or "short" in raw.split():
+        return "shorts", "the perfect everyday shorts"
     if any(x in raw for x in ("pants", "trouser", "cargo")) or focus == "pants":
         return "pants", "the perfect everyday pants"
+    if any(x in raw for x in ("jacket", "coat", "bomber", "cardigan")):
+        return "outerwear", "the perfect layering piece"
     if any(x in raw for x in ("shirt", "tee", "top", "blouse")) or focus in {"shirt", "hoodie"}:
         return "top", "the perfect everyday top"
     if any(x in raw for x in ("shoe", "sneaker", "boot", "heel", "loafer")) or focus == "shoes":
@@ -108,6 +114,27 @@ def _fashion_hook_options(job: ProductJob) -> list[str]:
             "found my new favorite dress",
             "the fit on this >>>",
             "need this in every color",
+        ],
+        "skirt": [
+            primary,
+            "this skirt fits so good >>>",
+            "found my new favorite skirt",
+            "the shape on this >>>",
+            "need this in every color",
+        ],
+        "shorts": [
+            primary,
+            "these shorts fit so good >>>",
+            "found my new favorite shorts",
+            "the fit on these >>>",
+            "need these in every color",
+        ],
+        "outerwear": [
+            primary,
+            "this layer pulls it together",
+            "found my new favorite jacket",
+            "the fit on this >>>",
+            "wearing this on repeat",
         ],
         "shoes": [
             primary,

@@ -22,6 +22,11 @@ def caption_for_job(job: ProductJob) -> str:
     return text_overlay._fashion_caption(job)
 
 
+def caption_options_for_job(job: ProductJob) -> list[str]:
+    """Return five product-aware choices for the manual FFmpeg dropdown."""
+    return text_overlay._fashion_hook_options(job)
+
+
 def _archive_only_after_manual_ffmpeg(db: Session, task: QueueTask) -> None:
     """Do not archive the raw returned video; archive only after the user adds text."""
     if _ORIGINAL_ARCHIVE_MEDIA is None:
@@ -151,6 +156,11 @@ def run_apply_text_overlay(db: Session, task: QueueTask) -> None:
             subheadline_color=subheadline_color,
             placement=placement,
         )
+        # The styled renderer always emits a true 1080x1920 final file, including
+        # 720p Seedance sources. Set this before any Drive fallback chooses a filename.
+        job.video_resolution = "1080p"
+        job.upscale_status = "completed"
+        job.upscale_error = None
 
         final_media_id = ""
         final_url = ""

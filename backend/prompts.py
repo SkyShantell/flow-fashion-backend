@@ -54,6 +54,18 @@ def default_motion_style(creator_profile: str = "Male") -> str:
     return "Academy — Elegant / Calm" if str(creator_profile or "").lower().startswith("f") else "Academy — Boss / Calm"
 
 
+def _resolved_product_focus(job) -> str:
+    """Respect the selected focus, while recovering obvious bottoms from imported titles."""
+    focus = str(getattr(job, "focus", None) or "outfit").strip().lower()
+    if focus and focus != "outfit":
+        return focus
+    name = re.sub(r"[^a-z0-9]+", " ", str(getattr(job, "product_name", None) or "").lower())
+    words = set(name.split())
+    if words.intersection({"pants", "pant", "jeans", "jean", "trousers", "trouser", "cargos", "cargo", "joggers", "jogger", "leggings", "legging", "sweatpants"}):
+        return "pants"
+    return focus or "outfit"
+
+
 def normalize_motion_style(style: str | None, creator_profile: str = "Male") -> str:
     """Map pre-V6 labels onto the closest Academy/custom preset without breaking old batches."""
     profile = str(creator_profile or "Male").lower()
@@ -92,7 +104,7 @@ def normalize_motion_style(style: str | None, creator_profile: str = "Male") -> 
 
 
 def image_prompt(job, *, scene: str, refs_count: int, creator_profile: str = "Male") -> str:
-    focus = getattr(job, "focus", None) or "outfit"
+    focus = _resolved_product_focus(job)
     product = getattr(job, "product_name", None) or "clothing"
     product_ref_count = max(0, refs_count - 1)
     product_ref_label = "reference image 2" if product_ref_count == 1 else f"reference images 2 through {refs_count}"
@@ -239,7 +251,7 @@ def _fit_reveal_beat() -> str:
 
 
 def _needs_back_side_fit(job) -> bool:
-    focus = str(getattr(job, "focus", None) or "").lower()
+    focus = _resolved_product_focus(job)
     name = re.sub(r"[^a-z0-9]+", " ", str(getattr(job, "product_name", None) or "").lower())
     return focus == "pants" or bool(getattr(job, "back_design", False)) or any(token in name.split() for token in ("dress", "skirt", "pants", "jeans", "jean", "trousers", "trouser"))
 
@@ -258,7 +270,7 @@ def _custom_product_motion(focus: str, profile: str) -> str:
     if focus == "handbag":
         return "Start with the bag at hip level. Lightly lift it, angle it toward the mirror to show shape, strap and hardware, take one small step, then let it rest naturally at true size."
     if focus == "pants":
-        return "Start full-body front view. Gesture to waistband, pocket and upper thigh, take a small half-step and quarter-turn to show side fit and leg shape, then finish angled with one leg forward."
+        return "Start full-body front view. Gesture only to the waistband, pocket and upper thigh, take a small half-step and quarter-turn to show side fit and leg shape, then finish angled with one leg forward. Never point to or touch the shirt, chest, collar or sleeves."
     if focus == "hoodie":
         return "Start front-facing. Touch the zipper/chest once, brush a cuff or pocket, take a small step, then make a natural quarter-turn so hood, sleeve shape and side fit stay visible."
     if focus == "shirt":
@@ -268,11 +280,33 @@ def _custom_product_motion(focus: str, profile: str) -> str:
     return "Start centered full-body, make one subtle confident free-hand opener, take one slow step, lightly pinch the fabric, make a side turn, then finish with a small nod."
 
 
+def _pants_academy_beats(style: str, creator_profile: str) -> list[str]:
+    """Pants-only selling beats; never reuse top/shirt gestures for bottoms."""
+    energy = "quick but controlled" if style in {"Academy — High-Energy", "Academy — Rapid-Fire / Flashy"} else "slow and controlled"
+    finish = "confident weight shift and small nod" if str(creator_profile or "Male").lower().startswith("m") else "soft weight shift with one leg slightly forward and a small nod"
+    return [
+        f"Beat 1 — Full-fit hook: hold a true head-to-toe frame with both legs and hems visible; make one {energy} free-hand point toward the waistband or front pocket only.",
+        "Beat 2 — Waist and rise: lightly trace the waistband, belt loops, closure or pocket opening with the free hand so the rise and waist fit are clear; do not touch the top.",
+        "Beat 3 — Hip and thigh fit: make a small weight shift and brush the fabric once at the outer hip or upper thigh to show drape and room through the seat and thigh.",
+        "Beat 4 — Side/back fit: take a small half-step and slow quarter-turn, briefly adjust the waistband at the side/back, then hold so the seat, side seam and pocket placement are readable.",
+        "Beat 5 — Leg shape and length: turn back toward the mirror with one leg slightly forward, keeping knees, lower legs and both hems fully in frame so cut, inseam, taper or flare and length are easy to judge.",
+        f"Beat 6 — Finish: settle into a natural full-length stance with a {finish}; keep the free hand near the waistband, pocket or relaxed at the side.",
+    ]
+
+
 def _academy_motion(job, style: str, creator_profile: str) -> tuple[str, str]:
-    focus = str(getattr(job, "focus", None) or "outfit").lower()
+    focus = _resolved_product_focus(job)
     profile = str(creator_profile or "Male").lower()
 
-    if focus == "handbag":
+    if focus == "pants":
+        title = "Academy product-specific — Pants / Bottoms"
+        beats = _pants_academy_beats(style, creator_profile)
+        product_rule = (
+            "Pants/bottoms are the only hero product. Preserve the exact waistband, rise, closure, belt loops, pockets, "
+            "seat fit, hip and thigh fit, seams, leg cut, inseam, length and hem in every frame. Keep the entire lower body "
+            "and both hems visible. Never point to, touch, pull, feature or sell the shirt/top, chest, collar, sleeves or upper-body garment."
+        )
+    elif focus == "handbag":
         title = "Academy product-specific — Handbag"
         beats = _handbag_academy_beats()
         product_rule = "Bag is the hero. Preserve exact texture, stitching, flap/closure, chain or strap, hardware, color, size and proportions in every frame."
@@ -291,7 +325,7 @@ def _academy_motion(job, style: str, creator_profile: str) -> tuple[str, str]:
 
 
 def video_prompt(job, *, creator_profile: str = "Male", video_style: str = "Academy — Boss / Calm") -> str:
-    focus = str(getattr(job, "focus", None) or "outfit").lower()
+    focus = _resolved_product_focus(job)
     style = normalize_motion_style(video_style, creator_profile)
     is_academy = style.startswith("Academy —")
 

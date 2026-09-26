@@ -23,8 +23,8 @@ PRESETS = {
         "description": "Italic serif headline with classic serif subline",
         "headline_font": FONT_SERIF_ITALIC,
         "subheadline_font": FONT_SERIF,
-        "headline_scale": 0.050,
-        "subheadline_scale": 0.031,
+        "headline_scale": 0.040,
+        "subheadline_scale": 0.024,
         "uppercase_subheadline": True,
     },
     "big_editorial": {
@@ -32,8 +32,8 @@ PRESETS = {
         "description": "Large fashion-magazine serif with a refined second line",
         "headline_font": FONT_SERIF,
         "subheadline_font": FONT_SERIF,
-        "headline_scale": 0.066,
-        "subheadline_scale": 0.031,
+        "headline_scale": 0.050,
+        "subheadline_scale": 0.024,
         "uppercase_subheadline": False,
     },
     "serif_pop": {
@@ -41,8 +41,8 @@ PRESETS = {
         "description": "Editorial serif headline with a bold social-style second line",
         "headline_font": FONT_SERIF,
         "subheadline_font": FONT_SANS_BOLD,
-        "headline_scale": 0.056,
-        "subheadline_scale": 0.033,
+        "headline_scale": 0.044,
+        "subheadline_scale": 0.025,
         "uppercase_subheadline": False,
     },
     "clean_social": {
@@ -50,8 +50,8 @@ PRESETS = {
         "description": "Bold clean headline with simple TikTok-style supporting text",
         "headline_font": FONT_SANS_BOLD,
         "subheadline_font": FONT_TIKTOK,
-        "headline_scale": 0.042,
-        "subheadline_scale": 0.030,
+        "headline_scale": 0.034,
+        "subheadline_scale": 0.023,
         "uppercase_subheadline": False,
     },
 }
@@ -289,7 +289,10 @@ def render_styled_overlay(
         output_path = root / "output.mp4"
         input_path.write_bytes(video_bytes)
 
-        width, height = _video_size(input_path)
+        # Every final Flow Fashion export is standardized to true 1080x1920. Seedance
+        # arrives at 720p, while other providers may already be 1080p; the same final
+        # FFmpeg pass safely normalizes both without changing the 9:16 composition.
+        width, height = 1080, 1920
         canvas = Image.new("RGBA", (width, height), (0, 0, 0, 0))
         draw = ImageDraw.Draw(canvas)
         max_width = int(width * 0.90)
@@ -367,7 +370,11 @@ def render_styled_overlay(
             "-i", str(input_path),
             "-i", str(overlay_path),
             "-filter_complex",
-            f"[0:v][1:v]overlay={left}:{top}:eof_action=repeat:repeatlast=1:eval=init:format=auto[v]",
+            (
+                f"[0:v]scale={width}:{height}:force_original_aspect_ratio=decrease,"
+                f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1[base];"
+                f"[base][1:v]overlay={left}:{top}:eof_action=repeat:repeatlast=1:eval=init:format=auto[v]"
+            ),
             "-map", "[v]",
             "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20",
             "-pix_fmt", "yuv420p", "-an", "-threads", "0",

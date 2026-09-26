@@ -13,7 +13,7 @@ import backend.tasks as tasks
 import backend.shoe_o1 as shoe_o1
 from backend.api import app, get_db, require_api_key
 from backend.flow_account_affinity import install_flow_account_affinity
-from backend.manual_ffmpeg import caption_for_job, install_manual_ffmpeg_handler
+from backend.manual_ffmpeg import caption_for_job, caption_options_for_job, install_manual_ffmpeg_handler
 from backend.models import Batch, EmojiAsset, ProductJob, QueueTask
 from backend.schemas import ApplyTextOverlayRequest, EmojiSeedRequest, UpdateVideoProviderRequest
 from backend.services import enhancor, sociavault, useapi
@@ -284,6 +284,7 @@ def text_overlay_config(job_id: str, db: Session = Depends(get_db)):
     previous = _latest_completed_overlay_payload(db, job)
     return {
         "headline": str(previous.get("headline") or caption_for_job(job)),
+        "headline_options": caption_options_for_job(job),
         "subheadline": str(previous.get("subheadline") or ""),
         "preset": str(previous.get("preset") or ("luxury_serif" if shoe_mode else "clean_social")),
         "emoji_prefix": str(previous.get("emoji_prefix") or ""),
