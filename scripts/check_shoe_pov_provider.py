@@ -124,7 +124,7 @@ def main() -> None:
 
     image_call = transport.calls[1]
     image_body = image_call["json"]
-    check(image_body["model"] == "nano-banana-2", "default image model is not nano-banana-2")
+    check(image_body["model"] == "nano-banana-pro", "Shoes POV image model is not locked to nano-banana-pro")
     check(image_body["aspectRatio"] == "9:16" and image_body["count"] == 1, "image shape/count is wrong")
     check(image_body["reference_1"] == "product_media_1", "product reference was not placed in slot 1")
     check(image_body["prompt"].startswith("@reference_1 is the exact product;"), "short Flow reference caption is missing")
@@ -173,7 +173,7 @@ def main() -> None:
         email="creator@example.com",
     )
     check(moderation_image["model"] == "nano-banana-pro", "moderation retry did not switch to nano-banana-pro")
-    check(moderation_transport.calls[0]["json"]["model"] == "nano-banana-2", "first moderation attempt used the wrong model")
+    check(moderation_transport.calls[0]["json"]["model"] == "nano-banana-pro", "first moderation attempt used the wrong model")
     check(moderation_transport.calls[1]["json"]["model"] == "nano-banana-pro", "second moderation attempt used the wrong model")
     check(moderation_transport.calls[1]["json"]["reference_1"] == "product_media_1", "moderation retry lost product slot 1")
 
@@ -217,7 +217,7 @@ def main() -> None:
     print("PASS: upscale retries twice, reaches 1080p job, and never sends email")
     print("PASS: submits use 120s timeout; polls use 45s timeout; polling is 3s/10s")
     print("PASS: Flow start-frame video sends no referenceImage fields")
-    print("PASS: moderation retries exactly once on nano-banana-pro")
+    print("PASS: Shoes POV always uses nano-banana-pro, including its one moderation retry")
     print("PASS: HTTP 400/401/402/403/404/408/429/500/503/596 decisions match the handoff")
     print("PASS: nested/root media, PNG sniffing, missing status, and FAILED operations")
     print("PASS: fake transport only — zero network calls and zero credits spent")
