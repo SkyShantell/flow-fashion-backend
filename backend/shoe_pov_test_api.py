@@ -10,8 +10,8 @@ from pydantic import BaseModel, Field
 
 from backend.config import settings
 from backend.services.shoe_pov_flow import FlowPovClient, FlowPovProviderError
-from backend.shoe_pov_image_gate import ImageGateError, OpenAIImageGateClient
-from backend.shoe_pov_prompts import build_video_prompt, choose_beats
+from backend.shoe_pov_image_gate import ImageGateError, OpenAIImageGateClient, image_guard_note
+from backend.shoe_pov_prompts import WORN_HOOKS, build_image_prompt, build_video_prompt, choose_beats
 from backend.shoe_pov_video_gate import OpenAIVideoGateClient, VideoGateError, extract_video_sheets
 
 
@@ -37,6 +37,16 @@ class VideoRequest(BaseModel):
     gender: str = "female"
     skin_tone: str = Field(min_length=1)
     seed: str = "tnf-thermoball-pink-worn-test-1"
+
+
+class RerenderImageRequest(BaseModel):
+    product_title: str = Field(min_length=1)
+    product_description: str = Field(min_length=1)
+    gender: str = "female"
+    skin_tone: str = Field(min_length=1)
+    seed: str = "tnf-thermoball-pink-worn-test-1"
+    reasons: list[str] = Field(min_length=1)
+    references: list[ImageReference] = Field(min_length=1, max_length=4)
 
 
 class VideoGateRequest(BaseModel):
@@ -126,6 +136,32 @@ def run_video(request: VideoRequest, x_shoe_pov_test_token: str = Header(default
     except FlowPovProviderError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return {"native": native, "upscaled": upscaled, "prompt": prompt}
+
+
+@app.post("/run-rerender-image")
+def run_rerender_image(request: RerenderImageRequest, x_shoe_pov_test_token: str = Header(default="")) -> dict:
+    _authorize(x_shoe_pov_test_token)
+    cfg = settings()
+    if not cfg.google_flow_email:
+        raise HTTPException(status_code=503, detail="GOOGLE_FLOW_EMAIL is not configured")
+    prompt = build_image_prompt(
+        gender=request.gender,
+        skin_tone=request.skin_tone,
+        product_title=request.product_title,
+        product_description=request.product_description,
+        format_name="worn",
+        hook=WORN_HOOKS[0],
+        seed=request.seed,
+        index=0,
+    )
+    prompt = f"{prompt}\n\n{image_guard_note(format_name='worn', reasons=request.reasons)}"
+    client = FlowPovClient()
+    try:
+        media_ids = [client.upload_product_asset(*_decode(reference), cfg.google_flow_email) for reference in request.references]
+        result = client.generate_image(prompt=prompt, product_media_ids=media_ids, email=cfg.google_flow_email)
+    except FlowPovProviderError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {**result, "prompt": prompt}
 
 
 @app.post("/run-video-gate")
