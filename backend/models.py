@@ -70,7 +70,9 @@ class Batch(Base):
     flow_account_email = Column(String(320), nullable=True)
 
     # Images always use Google Flow. This setting controls the approved-image -> video step.
-    video_provider = Column(String(40), default="omni")  # omni | kling
+    video_provider = Column(String(40), default="omni")  # fashion: omni | kling; shoes: enhancor | shoe_pov
+    shoe_pov_format = Column(String(20), default="held")  # held | worn
+    shoe_pov_skin_tone = Column(String(80), default="medium brown")
     kling_account_email = Column(String(320), nullable=True)
     kling_model = Column(String(80), default="kling-v3-0")
     kling_mode = Column(String(20), default="pro")
