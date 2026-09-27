@@ -113,23 +113,35 @@ def _job_out_with_download(job: ProductJob):
 base_api.job_out = _job_out_with_download
 
 
+def _shoe_provider(batch: Batch) -> str:
+    return "shoe_pov" if str(batch.video_provider or "").strip().lower() == "shoe_pov" else "enhancor"
+
+
 def _provider_config(batch: Batch) -> dict:
     if (batch.mode or "fashion_tryon") == "shoe_showcase":
+        provider = _shoe_provider(batch)
+        pov_format = "worn" if str(batch.shoe_pov_format or "").strip().lower() == "worn" else "held"
         return {
             "batch_id": batch.id,
             "batch_name": batch.name,
             "mode": batch.mode or "shoe_showcase",
-            "video_provider": "enhancor",
-            "video_provider_label": "Seedance 2.0 via Enhancor",
+            "video_provider": provider,
+            "video_provider_label": "Flow Shoes POV" if provider == "shoe_pov" else "Seedance 2.0 via Enhancor",
+            "shoe_pov_format": pov_format,
+            "shoe_pov_skin_tone": str(batch.shoe_pov_skin_tone or "medium brown"),
             "kling_account_email": None,
             "kling_model": "",
             "kling_mode": "",
             "kling_duration": 8,
             "kling_audio": False,
             "kling_multi_shot": False,
-            "aspect_ratio": "9:16 · approved Flow opener + selected shoe refs + black video",
+            "aspect_ratio": (
+                f"9:16 · Nano Banana Pro {pov_format} frame → Omni Flash 8s → 1080p"
+                if provider == "shoe_pov"
+                else "9:16 · approved Flow opener + selected shoe refs + black video"
+            ),
             "automatic_fallback": False,
-            "locked_for_shoes": True,
+            "locked_for_shoes": False,
         }
     return provider_config(batch)
 
@@ -440,11 +452,11 @@ def apply_text_overlay(
 def video_provider_health():
     return {
         "ok": True,
-        "providers": ["omni", "kling", "enhancor"],
+        "providers": ["omni", "kling", "enhancor", "shoe_pov"],
         "fashion_kling_model": "kling-v3-0",
         "fashion_kling_duration": 8,
-        "shoe_video_provider": "enhancor",
-        "shoe_video_model": "seedance-2.0",
+        "shoe_video_provider": "enhancor (default) or shoe_pov",
+        "shoe_video_model": "seedance-2.0 or omni-flash",
         "shoe_video_duration": 8,
         "shoe_reference_limit": 7,
         "kling_audio": False,
@@ -483,7 +495,28 @@ def update_batch_video_provider(
         raise HTTPException(404, "Batch not found")
 
     if (batch.mode or "fashion_tryon") == "shoe_showcase":
-        batch.video_provider = "enhancor"
+        requested_provider = "shoe_pov" if str(req.video_provider or "").strip().lower() == "shoe_pov" else "enhancor"
+        requested_format = "worn" if str(req.shoe_pov_format or "").strip().lower() == "worn" else "held"
+        requested_skin_tone = " ".join(str(req.shoe_pov_skin_tone or "medium brown").split())[:80] or "medium brown"
+        changed = (
+            requested_provider != _shoe_provider(batch)
+            or requested_format != ("worn" if str(batch.shoe_pov_format or "").strip().lower() == "worn" else "held")
+            or requested_skin_tone != str(batch.shoe_pov_skin_tone or "medium brown")
+        )
+        if changed:
+            active = db.query(QueueTask.id).filter(
+                QueueTask.batch_id == batch.id,
+                QueueTask.status.in_(["queued", "running"]),
+            ).first()
+            started = db.query(ProductJob.id).filter(
+                ProductJob.batch_id == batch.id,
+                ProductJob.image_status != "pending",
+            ).first()
+            if active or started:
+                raise HTTPException(409, "Choose the shoe provider before generating products. Create a new Shoe Showcase batch to compare providers safely.")
+        batch.video_provider = requested_provider
+        batch.shoe_pov_format = requested_format
+        batch.shoe_pov_skin_tone = requested_skin_tone
         batch.updated_at = datetime.now(timezone.utc)
         db.add(batch)
         db.commit()
