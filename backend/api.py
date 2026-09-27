@@ -118,7 +118,8 @@ FOCUS_VALUES = {"outfit", "shirt", "hoodie", "pants", "shoes", "handbag"}
 BATCH_VIEW_COLUMNS = (
     Batch.id, Batch.name, Batch.avatar_name, Batch.flow_account_email, Batch.mode,
     Batch.scene, Batch.scene_pool, Batch.creator_profile, Batch.video_style,
-    Batch.motion_pool, Batch.auto_approve, Batch.status,
+    Batch.motion_pool, Batch.auto_approve, Batch.video_provider, Batch.shoe_pov_format,
+    Batch.shoe_pov_skin_tone, Batch.status,
 )
 
 # Only columns that are actually serialized by job_out() or needed for batch counters.
@@ -206,6 +207,9 @@ def batch_out(batch: Batch, db: Session) -> BatchOut:
         name=batch.name,
         avatar_name=batch.avatar_name,
         flow_account_email=batch.flow_account_email,
+        video_provider=batch.video_provider or ("enhancor" if (batch.mode or "fashion_tryon") == "shoe_showcase" else "omni"),
+        shoe_pov_format=batch.shoe_pov_format or "held",
+        shoe_pov_skin_tone=batch.shoe_pov_skin_tone or "medium brown",
         mode=batch.mode or "fashion_tryon",
         scene=batch.scene,
         scene_pool=_scene_pool(batch),
@@ -417,6 +421,9 @@ def create_batch(req: CreateBatchRequest, db: Session = Depends(get_db)):
         avatar_source_email=avatar_source_email,
         avatar_name=avatar_name,
         flow_account_email=(preferred_email or None),
+        video_provider=("shoe_pov" if mode == "shoe_showcase" and str(req.video_provider or "").strip().lower() == "shoe_pov" else "enhancor" if mode == "shoe_showcase" else useapi.normalize_video_provider(req.video_provider)),
+        shoe_pov_format=("worn" if str(req.shoe_pov_format or "").strip().lower() == "worn" else "held"),
+        shoe_pov_skin_tone=(" ".join(str(req.shoe_pov_skin_tone or "medium brown").split())[:80] or "medium brown"),
     )
     db.add(batch)
     db.commit()
@@ -467,6 +474,9 @@ def create_batch_form(
         avatar_mime=avatar_mime,
         avatar_name=(str(avatar_name or "").strip()[:160] or None),
         flow_account_email=(useapi.normalize_account_email(flow_account_email) or None),
+        video_provider=("enhancor" if resolved_mode == "shoe_showcase" else "omni"),
+        shoe_pov_format="held",
+        shoe_pov_skin_tone="medium brown",
     )
     db.add(batch)
     db.commit()
@@ -529,6 +539,9 @@ def list_batch_summaries(db: Session = Depends(get_db)):
             "name": batch.name,
             "avatar_name": batch.avatar_name,
             "flow_account_email": batch.flow_account_email,
+            "video_provider": batch.video_provider or ("enhancor" if (batch.mode or "fashion_tryon") == "shoe_showcase" else "omni"),
+            "shoe_pov_format": batch.shoe_pov_format or "held",
+            "shoe_pov_skin_tone": batch.shoe_pov_skin_tone or "medium brown",
             "mode": batch.mode or "fashion_tryon",
             "scene": batch.scene,
             "scene_pool": _scene_pool(batch),
@@ -546,7 +559,10 @@ def list_batch_summaries(db: Session = Depends(get_db)):
 
 @app.get("/batches/{batch_id}/lite", dependencies=[Depends(require_api_key)])
 def get_batch_lite(batch_id: str, db: Session = Depends(get_db)):
-    batch = db.query(Batch.id, Batch.name, Batch.mode, Batch.status).filter(Batch.id == batch_id).first()
+    batch = db.query(
+        Batch.id, Batch.name, Batch.mode, Batch.status, Batch.video_provider,
+        Batch.shoe_pov_format, Batch.shoe_pov_skin_tone,
+    ).filter(Batch.id == batch_id).first()
     if not batch:
         raise HTTPException(404, "Batch not found")
     jobs = db.query(
@@ -559,6 +575,9 @@ def get_batch_lite(batch_id: str, db: Session = Depends(get_db)):
         "name": batch.name,
         "mode": batch.mode or "fashion_tryon",
         "status": batch.status or "open",
+        "video_provider": batch.video_provider or ("enhancor" if (batch.mode or "fashion_tryon") == "shoe_showcase" else "omni"),
+        "shoe_pov_format": batch.shoe_pov_format or "held",
+        "shoe_pov_skin_tone": batch.shoe_pov_skin_tone or "medium brown",
         "jobs": [
             {
                 "id": row.id,
