@@ -32,6 +32,8 @@ class CreateBatchRequest(BaseModel):
     avatar_name: str | None = None
     flow_account_email: str | None = None
     video_provider: str = "omni"
+    shoe_pov_format: str = "held"
+    shoe_pov_skin_tone: str = "medium brown"
     kling_account_email: str | None = None
     kling_model: str = "kling-v3-0"
     kling_mode: str = "pro"
@@ -64,6 +66,8 @@ class UpdateFlowAccountRequest(BaseModel):
 
 class UpdateVideoProviderRequest(BaseModel):
     video_provider: str = "omni"
+    shoe_pov_format: str = "held"
+    shoe_pov_skin_tone: str = "medium brown"
     kling_account_email: str | None = None
     kling_model: str = "kling-v3-0"
     kling_mode: str = "pro"
@@ -159,6 +163,8 @@ class BatchOut(BaseModel):
     avatar_name: str | None = None
     flow_account_email: str | None = None
     video_provider: str = "omni"
+    shoe_pov_format: str = "held"
+    shoe_pov_skin_tone: str = "medium brown"
     kling_account_email: str | None = None
     kling_model: str = "kling-v3-0"
     kling_mode: str = "pro"
