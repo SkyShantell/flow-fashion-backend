@@ -23,6 +23,8 @@ def _int_env(name: str, default: int) -> int:
 class Settings:
     # Providers
     useapi_token: str = os.getenv("USEAPI_TOKEN", "").strip()
+    openai_api_key: str = os.getenv("OPENAI_API_KEY", "").strip()
+    shoe_pov_vision_model: str = os.getenv("SHOE_POV_VISION_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"
     google_flow_email: str = os.getenv("GOOGLE_FLOW_EMAIL", "").strip()
     sociavault_api_key: str = os.getenv("SOCIAVAULT_API_KEY", "").strip()
     sociavault_region: str = os.getenv("SOCIAVAULT_REGION", "US").strip() or "US"

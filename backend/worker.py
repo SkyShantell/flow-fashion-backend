@@ -112,7 +112,7 @@ def main():
     cfg = settings()
     concurrency = max(1, int(cfg.worker_concurrency or 1))
     log.info(
-        "Flow Phase 1 worker started · concurrency=%s · image=%s · Flow video=%s · fashion Kling=3.0/8s · shoes=Seedance 2.0 via Enhancor · final=%s · FFmpeg text=manual",
+        "Flow Phase 1 worker started · concurrency=%s · image=%s · Flow video=%s · fashion Kling=3.0/8s · shoes=Seedance 2.0 or Flow Shoes POV · final=%s · FFmpeg text=manual",
         concurrency,
         cfg.image_model,
         cfg.video_model,
