@@ -58,6 +58,10 @@ class HeldImageRequest(BaseModel):
     references: list[ImageReference] = Field(min_length=1, max_length=4)
 
 
+class HeldRerenderRequest(HeldImageRequest):
+    reasons: list[str] = Field(min_length=1)
+
+
 class HeldVideoRequest(BaseModel):
     start_image_media_id: str = Field(min_length=1)
     product_title: str = Field(min_length=1)
@@ -198,6 +202,32 @@ def run_held_image(request: HeldImageRequest, x_shoe_pov_test_token: str = Heade
         seed=request.seed,
         index=0,
     )
+    client = FlowPovClient()
+    try:
+        media_ids = [client.upload_product_asset(*_decode(reference), cfg.google_flow_email) for reference in request.references]
+        result = client.generate_image(prompt=prompt, product_media_ids=media_ids, email=cfg.google_flow_email)
+    except FlowPovProviderError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {**result, "prompt": prompt}
+
+
+@app.post("/run-held-rerender")
+def run_held_rerender(request: HeldRerenderRequest, x_shoe_pov_test_token: str = Header(default="")) -> dict:
+    _authorize(x_shoe_pov_test_token)
+    cfg = settings()
+    if not cfg.google_flow_email:
+        raise HTTPException(status_code=503, detail="GOOGLE_FLOW_EMAIL is not configured")
+    prompt = build_image_prompt(
+        gender=request.gender,
+        skin_tone=request.skin_tone,
+        product_title=request.product_title,
+        product_description=request.product_description,
+        format_name="held",
+        hook=HELD_HOOKS[0],
+        seed=request.seed,
+        index=0,
+    )
+    prompt = f"{prompt}\n\n{image_guard_note(format_name='held', reasons=request.reasons)}"
     client = FlowPovClient()
     try:
         media_ids = [client.upload_product_asset(*_decode(reference), cfg.google_flow_email) for reference in request.references]
