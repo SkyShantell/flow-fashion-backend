@@ -434,7 +434,10 @@ def apply_text_overlay(
             "position_y": float(request.position_y),
         },
         priority=75,
-        max_attempts=2,
+        # Drive performs bounded internal retries without rerendering the MP4. If
+        # storage still fails, return control to the user instead of burning CPU on
+        # an identical second FFmpeg render.
+        max_attempts=1,
         allow_duplicate=True,
     )
     db.commit()

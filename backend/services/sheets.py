@@ -106,15 +106,17 @@ def mark_scanner_rows(row_nums: list[int], status: str, batch_id: str = "") -> s
         return str(exc)
 
 
-def ensure_tracker_sheet():
+def ensure_tracker_sheet(*, read_existing: bool = True):
     book, gspread = open_book()
+    created = False
     try:
         ws = book.worksheet(TRACKER_TAB)
     except gspread.WorksheetNotFound:
         ws = book.add_worksheet(title=TRACKER_TAB, rows=1000, cols=len(TRACKER_HEADERS) + 3)
-    existing = ws.get_all_values()
-    ws.update(range_name="A1", values=[TRACKER_HEADERS], value_input_option="USER_ENTERED")
-    if not existing:
+        created = True
+    existing = ws.get_all_values() if read_existing or created else []
+    if created or (read_existing and not existing):
+        ws.update(range_name="A1", values=[TRACKER_HEADERS], value_input_option="USER_ENTERED")
         existing = [TRACKER_HEADERS]
     return book, ws, existing
 
@@ -157,7 +159,22 @@ def sync_job(job, db) -> tuple[bool, str]:
     if not cfg.google_sheet_auto_sync or not cfg.google_sheet_url or not google_service_account_info():
         return False, "Google Sheets auto-sync is not configured."
     try:
-        _book, ws, existing = ensure_tracker_sheet()
+        # Once a job has a sheet row, updating it requires no spreadsheet-wide read.
+        # The previous implementation called get_all_values for every status change,
+        # exhausting the per-user read quota during multi-video batches.
+        known_row = int(job.sheet_row or 0)
+        _book, ws, existing = ensure_tracker_sheet(read_existing=not bool(known_row))
+        if known_row:
+            target_row = max(2, known_row)
+            product_number = max(1, target_row - 1)
+            job.sheet_row = target_row
+            db.add(job)
+            db.flush()
+            last_col = chr(ord("A") + len(TRACKER_HEADERS) - 1) if len(TRACKER_HEADERS) <= 26 else "AA"
+            row = job_to_tracker_row(job, product_number, target_row)
+            ws.update(range_name=f"A{target_row}:{last_col}{target_row}", values=[row], value_input_option="USER_ENTERED")
+            return True, f"Synced row {target_row}."
+
         row_by_job = {}
         max_product = 0
         for row_idx, raw in enumerate(existing[1:], start=2):

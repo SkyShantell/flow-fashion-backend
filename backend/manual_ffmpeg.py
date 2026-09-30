@@ -5,6 +5,7 @@ from typing import Callable
 
 from sqlalchemy.orm import Session
 
+from backend.config import settings
 from backend.models import Batch, ProductJob, QueueTask
 from backend.services import drive, useapi
 from backend.styled_overlay import render_styled_overlay
@@ -74,8 +75,8 @@ def _download_ffmpeg_source(job: ProductJob, payload: dict) -> bytes | None:
     return None
 
 
-def _archive_ffmpeg_fallback(db: Session, batch: Batch, job: ProductJob, final_bytes: bytes) -> dict:
-    """Persist a rendered MP4 to Drive when Google Flow refuses a video asset upload."""
+def _archive_ffmpeg_output(db: Session, batch: Batch, job: ProductJob, final_bytes: bytes) -> dict:
+    """Persist the finished MP4 directly to Drive with bounded upload retries."""
     idx = 1 + db.query(ProductJob).filter(
         ProductJob.batch_id == batch.id,
         ProductJob.created_at < job.created_at,
@@ -181,36 +182,54 @@ def run_apply_text_overlay(db: Session, task: QueueTask) -> None:
         final_media_id = ""
         final_url = ""
         final_source_email = ""
-        storage_mode = "flow_asset"
+        storage_mode = "drive"
         drive_payload: dict | None = None
 
-        try:
-            uploaded = useapi.upload_video_asset(final_bytes, tasks._batch_flow_account(batch))
-            final_media_id = str(uploaded.get("media_id") or "").strip()
-            if not final_media_id:
-                raise RuntimeError("FFmpeg output uploaded without a media ID.")
-            final_url = str(useapi.resolve_asset_url(final_media_id) or "").strip()
-            final_source_email = str(uploaded.get("email") or job.video_source_email or "").strip()
-        except Exception as upload_exc:
-            upload_error = str(upload_exc)
-            if "HTTP 410" not in upload_error and "Video upload init failed" not in upload_error:
-                raise
-            log.warning(
-                "Flow rejected FFmpeg MP4 upload; using Drive fallback · job=%s · error=%s",
-                job.id,
-                upload_error[:1000],
-            )
-            drive_payload = _archive_ffmpeg_fallback(db, batch, job, final_bytes)
-            final_url = str(
-                drive_payload.get("download_url")
-                or drive_payload.get("view_url")
-                or ""
-            ).strip()
-            if not final_url:
-                raise RuntimeError("Drive saved the FFmpeg output but returned no usable URL.")
-            storage_mode = "drive_fallback"
+        cfg = settings()
+        drive_error = ""
+        if cfg.google_drive_archive_webhook_url and cfg.google_drive_archive_secret:
+            try:
+                drive_payload = _archive_ffmpeg_output(db, batch, job, final_bytes)
+                final_url = str(
+                    drive_payload.get("download_url")
+                    or drive_payload.get("view_url")
+                    or ""
+                ).strip()
+                if not final_url:
+                    raise RuntimeError("Drive saved the FFmpeg output but returned no usable URL.")
+            except Exception as drive_exc:
+                drive_error = str(drive_exc)
+                log.warning(
+                    "Drive could not store FFmpeg MP4; trying Flow asset fallback · job=%s · error=%s",
+                    job.id,
+                    drive_error[:1000],
+                )
 
-        if storage_mode == "drive_fallback" and drive_payload:
+        if not drive_payload:
+            storage_mode = "flow_asset"
+            try:
+                uploaded = useapi.upload_video_asset(final_bytes, tasks._batch_flow_account(batch))
+                final_media_id = str(uploaded.get("media_id") or "").strip()
+                if not final_media_id:
+                    raise RuntimeError("FFmpeg output uploaded without a media ID.")
+                final_url = str(useapi.resolve_asset_url(final_media_id) or "").strip()
+                final_source_email = str(uploaded.get("email") or job.video_source_email or "").strip()
+            except Exception as upload_exc:
+                upload_error = str(upload_exc)
+                if drive_error:
+                    raise RuntimeError(
+                        f"FFmpeg rendered successfully, but storage failed. Drive: {drive_error[:900]} | Flow: {upload_error[:900]}"
+                    ) from upload_exc
+                raise
+
+        if storage_mode == "drive" and drive_payload:
+            log.info(
+                "FFmpeg MP4 stored directly in Drive · job=%s · file=%s",
+                job.id,
+                str(drive_payload.get("file_id") or "-")[:120],
+            )
+
+        if storage_mode == "drive" and drive_payload:
             # Preserve the raw source in this completed task payload for future Redo FFmpeg,
             # but remove it from the job's final-media fields so downloads cannot accidentally
             # fall back to the uncaptioned source video.

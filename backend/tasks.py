@@ -36,6 +36,14 @@ FLOW_TRANSIENT_ERROR_MARKERS = (
     "captcha_quality",
     "see get /accounts recommendations",
 )
+FLOW_CAPTCHA_OUTAGE_MARKERS = (
+    "captcha service failed",
+    "capsolver create failed",
+    "anticaptcha unavailable",
+)
+FLOW_CAPTCHA_CONFIG_MARKERS = (
+    "api key invalid or balance insufficient",
+)
 log = logging.getLogger("flow-import")
 _GB_TITLE_URL_LOGGED = False
 
@@ -237,6 +245,28 @@ def enqueue_task(
     max_attempts: int = 3,
     allow_duplicate: bool = False,
 ) -> QueueTask:
+    # Status changes can enqueue the same sheet update many times in a few seconds.
+    # Keep at most one queued follow-up per job (a currently-running sync may still
+    # receive one follow-up so its just-written row is not stale).
+    if task_type == "sync_sheet" and job_id:
+        queued_sync = (
+            db.query(QueueTask)
+            .filter(
+                QueueTask.job_id == job_id,
+                QueueTask.task_type == task_type,
+                QueueTask.status == "queued",
+            )
+            .order_by(QueueTask.created_at.desc())
+            .first()
+        )
+        if queued_sync:
+            queued_sync.priority = min(int(queued_sync.priority or priority), int(priority))
+            queued_sync.run_after = min(queued_sync.run_after or _now(), run_after or _now())
+            if payload:
+                queued_sync.payload = {**dict(queued_sync.payload or {}), **payload}
+            db.add(queued_sync)
+            db.flush()
+            return queued_sync
     if not allow_duplicate and job_id:
         existing = (
             db.query(QueueTask)
@@ -287,7 +317,17 @@ def _fail_task(db: Session, task: QueueTask, error: str) -> None:
     if not job:
         return
     display_error = str(error)
-    if any(marker in display_error.lower() for marker in FLOW_TRANSIENT_ERROR_MARKERS):
+    if any(marker in display_error.lower() for marker in FLOW_CAPTCHA_CONFIG_MARKERS):
+        display_error = (
+            "Google Flow's CAPTCHA solver rejected the request because its API key or balance "
+            "is invalid. Generation stopped immediately; check the provider CAPTCHA settings/balance, then press Retry."
+        )
+    elif any(marker in display_error.lower() for marker in FLOW_CAPTCHA_OUTAGE_MARKERS):
+        display_error = (
+            "Google Flow's CAPTCHA service is temporarily unavailable. "
+            "Automatic retries were exhausted; wait a few minutes, then press Retry."
+        )
+    elif any(marker in display_error.lower() for marker in FLOW_TRANSIENT_ERROR_MARKERS):
         display_error = (
             "Google Flow temporarily blocked requests because of unusual activity. "
             "Automatic retries were exhausted; wait a few minutes, then press Retry or choose another Flow account."
@@ -1468,6 +1508,31 @@ def run_task_by_id(task_id: str) -> str:
                 task.task_type in FLOW_TRANSIENT_TASKS
                 and any(marker in error.lower() for marker in FLOW_TRANSIENT_ERROR_MARKERS)
             )
+            is_captcha_outage = (
+                task.task_type in FLOW_MUTATING_TASKS
+                and any(marker in error.lower() for marker in FLOW_CAPTCHA_OUTAGE_MARKERS)
+            )
+            is_captcha_config = (
+                task.task_type in FLOW_MUTATING_TASKS
+                and any(marker in error.lower() for marker in FLOW_CAPTCHA_CONFIG_MARKERS)
+            )
+            if is_captcha_config:
+                _fail_task(db, task, error)
+                log.error(
+                    "Google Flow CAPTCHA provider configuration failure · type=%s · job=%s",
+                    task.task_type,
+                    task.job_id or "-",
+                )
+                return f"failed CAPTCHA configuration · type={task.task_type} · job={task.job_id or '-'}"
+            if is_captcha_outage and int(task.attempts or 0) < 3:
+                task.max_attempts = max(int(task.max_attempts or 0), 3)
+                delay = 60 * max(1, int(task.attempts or 1))
+                _requeue(db, task, error, delay_seconds=delay)
+                log.warning(
+                    "Google Flow CAPTCHA provider cooldown · type=%s · job=%s · attempt=%s/3 · retry_in=%ss",
+                    task.task_type, task.job_id or "-", task.attempts, delay,
+                )
+                return f"requeued CAPTCHA cooldown · type={task.task_type} · job={task.job_id or '-'} · retry_in={delay}s"
             if is_transient_flow_block and int(task.attempts or 0) < 8:
                 task.max_attempts = max(int(task.max_attempts or 0), 8)
                 delay = min(900, 120 * max(1, int(task.attempts or 1)))
